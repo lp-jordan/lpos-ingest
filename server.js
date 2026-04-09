@@ -24,6 +24,10 @@ const s3 = new S3Client({
 app.use(express.static(join(__dirname, 'public')))
 app.use(express.urlencoded({ extended: true }))
 
+// ── Health / root ─────────────────────────────────────────────────────────────
+
+app.get('/', (_req, res) => res.status(200).send('OK'))
+
 // ── Client upload page ────────────────────────────────────────────────────────
 
 app.get('/c/:token', async (req, res) => {
