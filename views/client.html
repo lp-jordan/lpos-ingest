@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en" data-token="{{TOKEN}}">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Upload Files</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="page">
+
+    <!-- Header -->
+    <header class="ingest-header">
+      <div class="ingest-wordmark">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+        </svg>
+        Leader Pass
+      </div>
+      <h1 class="ingest-greeting">Hi, {{CLIENT_NAME}}!</h1>
+      <p class="ingest-subtext">Upload your files below — we'll take it from there.</p>
+    </header>
+
+    <!-- Upload zone -->
+    <div class="upload-zone" id="upload-zone" role="button" tabindex="0" aria-label="Upload files">
+      <div class="upload-zone-icon" id="zone-icon">
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/>
+          <path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/>
+        </svg>
+      </div>
+      <p class="upload-zone-label" id="zone-label">
+        <strong>Click to upload</strong> or drag and drop
+      </p>
+      <p class="upload-zone-hint">Any file type &middot; Up to 500 MB</p>
+      <div class="upload-bar-wrap" style="margin-top: 4px;">
+        <div class="upload-bar-fill" id="upload-bar-fill"></div>
+      </div>
+    </div>
+
+    <input type="file" id="file-input" multiple style="display:none" />
+
+    <!-- File browser -->
+    <p class="section-label">Your files</p>
+    <div class="file-grid" id="file-grid">
+      <p class="files-empty">Loading…</p>
+    </div>
+
+  </div>
+
+  <!-- Toast -->
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script src="/client.js"></script>
+</body>
+</html>
