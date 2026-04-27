@@ -333,3 +333,144 @@ button:focus-visible, a:focus-visible {
 
 .toast--success { border-color: rgba(151, 185, 137, 0.4); color: var(--success); }
 .toast--error   { border-color: rgba(200, 100, 100, 0.4); color: #e08080; }
+
+/* ── Delivery page ───────────────────────────────────────────────────────────── */
+
+.delivery-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.delivery-select-all {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.83rem;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.delivery-select-all input[type="checkbox"] {
+  accent-color: var(--accent);
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+}
+
+.delivery-download-btn {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  background: var(--accent-soft);
+  border: 1px solid rgba(219, 175, 95, 0.28);
+  border-radius: 8px;
+  color: var(--accent-strong);
+  cursor: pointer;
+  font-size: 0.83rem;
+  font-weight: 500;
+  padding: 6px 14px;
+}
+
+.delivery-download-btn:hover:not(:disabled) {
+  background: rgba(219, 175, 95, 0.26);
+  border-color: rgba(219, 175, 95, 0.48);
+}
+
+.delivery-download-btn:disabled {
+  opacity: 0.38;
+  cursor: default;
+}
+
+/* ── Delivery file list ───────────────────────────────────────────────────────── */
+
+.delivery-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 32px;
+}
+
+.dlv-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+
+.dlv-row:hover {
+  border-color: var(--line-strong);
+  box-shadow: var(--shadow-sm);
+}
+
+.dlv-row-check-wrap {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.dlv-row-check {
+  accent-color: var(--accent);
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+}
+
+.dlv-row-icon {
+  color: var(--muted-soft);
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  width: 28px;
+}
+
+.dlv-row-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.dlv-row-name {
+  color: var(--text-strong);
+  font-size: 0.9rem;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dlv-row-meta {
+  color: var(--muted-soft);
+  font-size: 0.73rem;
+  margin-top: 2px;
+}
+
+.dlv-row-dl {
+  background: none;
+  border: none;
+  border-radius: 6px;
+  color: var(--muted-soft);
+  cursor: pointer;
+  flex-shrink: 0;
+  opacity: 0;
+  padding: 5px;
+  transition: opacity 0.12s, background 0.12s, color 0.12s;
+}
+
+.dlv-row:hover .dlv-row-dl { opacity: 1; }
+.dlv-row-dl:hover { background: var(--surface-3); color: var(--accent); }
+
+/* ── Delivery expiry notice ───────────────────────────────────────────────────── */
+
+.delivery-expiry {
+  color: var(--muted-soft);
+  font-size: 0.75rem;
+  letter-spacing: 0.03em;
+  text-align: center;
+  margin: 0;
+}

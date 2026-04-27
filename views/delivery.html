@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en" data-token="{{TOKEN}}" data-project="{{PROJECT_NAME}}" data-client="{{CLIENT_NAME}}" data-label="{{LABEL}}">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{PROJECT_NAME}} — Delivery</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="page">
+
+    <!-- Header -->
+    <header class="ingest-header">
+      <div class="ingest-wordmark">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+        </svg>
+        Leader Pass
+      </div>
+      <h1 class="ingest-greeting" id="delivery-heading">Your files are ready.</h1>
+      <p class="ingest-subtext" id="delivery-subtext"></p>
+    </header>
+
+    <!-- Actions row -->
+    <div class="delivery-actions">
+      <label class="delivery-select-all">
+        <input type="checkbox" id="select-all" />
+        <span>Select all</span>
+      </label>
+      <button class="delivery-download-btn" id="download-selected" disabled>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+        </svg>
+        Download selected
+      </button>
+    </div>
+
+    <!-- File list -->
+    <p class="section-label">Files</p>
+    <div class="delivery-list" id="delivery-list">
+      <p class="files-empty">Loading…</p>
+    </div>
+
+    <!-- Expiry notice -->
+    <p class="delivery-expiry" id="delivery-expiry">Available until {{EXPIRES}}</p>
+
+  </div>
+
+  <!-- Toast -->
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script src="/delivery.js"></script>
+</body>
+</html>
