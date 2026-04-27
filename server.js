@@ -161,6 +161,17 @@ app.use('/api/delivery', (req, res, next) => {
 
 app.get('/', (_req, res) => res.status(200).send('OK'))
 
+// Temporary key diagnostic — remove after confirming Railway env vars
+app.get('/api/key-debug', (_req, res) => {
+  const k = process.env.INGEST_API_KEY
+  res.json({
+    set: !!k,
+    length: k?.length ?? 0,
+    first4: k?.slice(0, 4) ?? '',
+    last4:  k?.slice(-4) ?? '',
+  })
+})
+
 // ── Client upload page ────────────────────────────────────────────────────────
 
 app.get('/c/:token', async (req, res) => {
