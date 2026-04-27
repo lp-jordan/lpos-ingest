@@ -402,12 +402,15 @@ app.get('/d/:token', async (req, res) => {
     month: 'long', day: 'numeric', year: 'numeric',
   })
 
+  const clientNameTitle = link.client_name ? `${escapeHtml(link.client_name)} — ` : ''
+
   const html = readFileSync(join(__dirname, 'views/delivery.html'), 'utf8')
-    .replace('{{TOKEN}}',        escapeHtml(req.params.token))
-    .replace('{{PROJECT_NAME}}', escapeHtml(link.project_name))
-    .replace('{{CLIENT_NAME}}',  escapeHtml(link.client_name || ''))
-    .replace('{{LABEL}}',        escapeHtml(link.label || ''))
-    .replace('{{EXPIRES}}',      escapeHtml(expiryStr))
+    .replace('{{TOKEN}}',             escapeHtml(req.params.token))
+    .replace('{{PROJECT_NAME}}',      escapeHtml(link.project_name))
+    .replace('{{CLIENT_NAME}}',       escapeHtml(link.client_name || ''))
+    .replace('{{CLIENT_NAME_TITLE}}', clientNameTitle)
+    .replace('{{LABEL}}',             escapeHtml(link.label || ''))
+    .replace('{{EXPIRES}}',           escapeHtml(expiryStr))
 
   res.send(html)
 })

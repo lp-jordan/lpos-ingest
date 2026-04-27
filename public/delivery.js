@@ -14,8 +14,7 @@ const selected = new Set()
 
 if (clientName) headingEl.textContent = `Hi, ${clientName}!`
 
-const parts = [projectName, label].filter(Boolean)
-subtextEl.textContent = parts.join(' · ')
+subtextEl.textContent = label || ''
 
 // ── Toast ──────────────────────────────────────────────────────────────────────
 
