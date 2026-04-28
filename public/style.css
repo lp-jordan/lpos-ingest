@@ -87,16 +87,12 @@ button:focus-visible, a:focus-visible {
 .ingest-wordmark {
   display: flex;
   align-items: center;
-  gap: 8px;
   margin-bottom: 32px;
-  color: var(--muted-soft);
-  font-size: 0.78rem;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
 }
 
-.ingest-wordmark svg {
-  color: var(--accent);
+.ingest-logo {
+  height: 22px;
+  width: auto;
 }
 
 .ingest-greeting {
