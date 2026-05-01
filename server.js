@@ -118,14 +118,19 @@ async function initDeliveryTables() {
   `)
   await db.query(`
     CREATE TABLE IF NOT EXISTS delivery_link_assets (
-      id        SERIAL PRIMARY KEY,
-      token     TEXT NOT NULL REFERENCES delivery_links(token) ON DELETE CASCADE,
-      r2_key    TEXT NOT NULL,
-      filename  TEXT NOT NULL,
-      file_size BIGINT NOT NULL,
-      mime_type TEXT NOT NULL
+      id              SERIAL PRIMARY KEY,
+      token           TEXT NOT NULL REFERENCES delivery_links(token) ON DELETE CASCADE,
+      r2_key          TEXT NOT NULL,
+      filename        TEXT NOT NULL,
+      file_size       BIGINT NOT NULL,
+      mime_type       TEXT NOT NULL,
+      thumbnail_url   TEXT,
+      thumbnail_r2_key TEXT
     )
   `)
+  // Migrate existing tables — safe to run repeatedly
+  await db.query(`ALTER TABLE delivery_link_assets ADD COLUMN IF NOT EXISTS thumbnail_url TEXT`)
+  await db.query(`ALTER TABLE delivery_link_assets ADD COLUMN IF NOT EXISTS thumbnail_r2_key TEXT`)
   await db.query(`
     CREATE TABLE IF NOT EXISTS delivery_link_access (
       id          SERIAL PRIMARY KEY,
@@ -300,9 +305,9 @@ app.post('/api/delivery', requireApiKey, async (req, res) => {
 
   for (const a of assets) {
     await db.query(
-      `INSERT INTO delivery_link_assets (token, r2_key, filename, file_size, mime_type)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [token, a.r2_key, a.filename, a.file_size, a.mime_type]
+      `INSERT INTO delivery_link_assets (token, r2_key, filename, file_size, mime_type, thumbnail_url, thumbnail_r2_key)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [token, a.r2_key, a.filename, a.file_size, a.mime_type, a.thumbnail_url || null, a.thumbnail_r2_key || null]
     )
   }
 
@@ -368,13 +373,16 @@ app.delete('/api/delivery/:token', requireApiKey, async (req, res) => {
   if (!link.rows.length) return res.status(404).json({ error: 'Not found or already revoked' })
 
   const assets = await db.query(
-    'SELECT r2_key FROM delivery_link_assets WHERE token = $1',
+    'SELECT r2_key, thumbnail_r2_key FROM delivery_link_assets WHERE token = $1',
     [req.params.token]
   )
 
-  await Promise.all(assets.rows.map(a =>
-    s3.send(new DeleteObjectCommand({ Bucket: process.env.R2_BUCKET, Key: a.r2_key })).catch(() => {})
-  ))
+  await Promise.all(assets.rows.flatMap(a => [
+    s3.send(new DeleteObjectCommand({ Bucket: process.env.R2_BUCKET, Key: a.r2_key })).catch(() => {}),
+    a.thumbnail_r2_key
+      ? s3.send(new DeleteObjectCommand({ Bucket: process.env.R2_BUCKET, Key: a.thumbnail_r2_key })).catch(() => {})
+      : null,
+  ].filter(Boolean)))
 
   await db.query(
     'UPDATE delivery_links SET revoked_at = NOW() WHERE token = $1',
@@ -428,10 +436,22 @@ app.get('/d/:token/files', async (req, res) => {
   }
 
   const assets = await db.query(
-    'SELECT r2_key, filename, file_size, mime_type FROM delivery_link_assets WHERE token = $1 ORDER BY id',
+    'SELECT r2_key, filename, file_size, mime_type, thumbnail_url, thumbnail_r2_key FROM delivery_link_assets WHERE token = $1 ORDER BY id',
     [req.params.token]
   )
-  res.json(assets.rows)
+
+  const rows = await Promise.all(assets.rows.map(async (a) => {
+    let thumbnailUrl = a.thumbnail_url || null
+    if (!thumbnailUrl && a.thumbnail_r2_key) {
+      thumbnailUrl = await getSignedUrl(s3, new GetObjectCommand({
+        Bucket: process.env.R2_BUCKET,
+        Key: a.thumbnail_r2_key,
+      }), { expiresIn: 86400 }).catch(() => null) // 24h, silent on error
+    }
+    return { r2_key: a.r2_key, filename: a.filename, file_size: a.file_size, mime_type: a.mime_type, thumbnail_url: thumbnailUrl }
+  }))
+
+  res.json(rows)
 })
 
 // Range-aware file download proxy — logs access per file
@@ -493,10 +513,13 @@ async function sweepExpiredDeliveries() {
      WHERE revoked_at IS NULL AND expires_at < NOW()`
   )
   for (const { token } of expired.rows) {
-    const assets = await db.query('SELECT r2_key FROM delivery_link_assets WHERE token = $1', [token])
-    await Promise.all(assets.rows.map(a =>
-      s3.send(new DeleteObjectCommand({ Bucket: process.env.R2_BUCKET, Key: a.r2_key })).catch(() => {})
-    ))
+    const assets = await db.query('SELECT r2_key, thumbnail_r2_key FROM delivery_link_assets WHERE token = $1', [token])
+    await Promise.all(assets.rows.flatMap(a => [
+      s3.send(new DeleteObjectCommand({ Bucket: process.env.R2_BUCKET, Key: a.r2_key })).catch(() => {}),
+      a.thumbnail_r2_key
+        ? s3.send(new DeleteObjectCommand({ Bucket: process.env.R2_BUCKET, Key: a.thumbnail_r2_key })).catch(() => {})
+        : null,
+    ].filter(Boolean)))
     await db.query('UPDATE delivery_links SET revoked_at = NOW() WHERE token = $1', [token])
   }
 }

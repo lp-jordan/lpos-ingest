@@ -93,7 +93,12 @@ function renderFiles() {
       <label class="dlv-row-check-wrap">
         <input type="checkbox" class="dlv-row-check" data-key="${escHtml(f.r2_key)}" />
       </label>
-      <div class="dlv-row-icon">${iconForMime(f.mime_type)}</div>
+      <div class="dlv-row-icon">
+        ${f.thumbnail_url
+          ? `<img src="${escHtml(f.thumbnail_url)}" alt="" class="dlv-row-thumb" onerror="this.parentElement.innerHTML='${iconForMime(f.mime_type).replace(/'/g, "\\'").replace(/\n/g, '')}'"/>`
+          : iconForMime(f.mime_type)
+        }
+      </div>
       <div class="dlv-row-info">
         <div class="dlv-row-name" title="${escHtml(f.filename)}">${escHtml(f.filename)}</div>
         <div class="dlv-row-meta">${formatSize(f.file_size)} &middot; ${extLabel(f.filename)}</div>
