@@ -95,7 +95,7 @@ function renderFiles() {
       </label>
       <div class="dlv-row-icon">
         ${f.thumbnail_url
-          ? `<img src="${escHtml(f.thumbnail_url)}" alt="" class="dlv-row-thumb" onerror="this.parentElement.innerHTML='${iconForMime(f.mime_type).replace(/'/g, "\\'").replace(/\n/g, '')}'"/>`
+          ? `<img src="${escHtml(f.thumbnail_url)}" alt="" class="dlv-row-thumb" onerror="this.parentElement.innerHTML='${iconForMime(f.mime_type).replace(/"/g, '&quot;').replace(/'/g, "\\'").replace(/\n/g, '')}'"/>`
           : iconForMime(f.mime_type)
         }
       </div>
