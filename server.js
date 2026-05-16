@@ -511,11 +511,16 @@ app.get('/d/:token/download', async (req, res) => {
   res.status(rangeHeader ? 206 : 200)
   s3Res.Body.pipe(res)
 
-  // Log asynchronously — don't await so the download isn't delayed
-  db.query(
-    'INSERT INTO delivery_link_access (token, ip, user_agent, file_key) VALUES ($1, $2, $3, $4)',
-    [req.params.token, req.ip, req.headers['user-agent'] || null, key]
-  ).catch(() => {})
+  // Log asynchronously — only on first chunk (bytes=0-...) or non-Range requests.
+  // Chunked downloads issue one request per 25 MB chunk; logging every chunk would
+  // count a single file download as N events and inflate access analytics badly.
+  const isFirstChunk = !rangeHeader || rangeHeader.startsWith('bytes=0-')
+  if (isFirstChunk) {
+    db.query(
+      'INSERT INTO delivery_link_access (token, ip, user_agent, file_key) VALUES ($1, $2, $3, $4)',
+      [req.params.token, req.ip, req.headers['user-agent'] || null, key]
+    ).catch(() => {})
+  }
 })
 
 // ── Delivery trouble report ───────────────────────────────────────────────────

@@ -295,17 +295,21 @@ function initRenderRows() {
     list.appendChild(row)
     rowCache.set(f.r2_key, row)
 
-    // Attach checkbox handler
+    // Attach checkbox + row click handler.
+    // Plain click anywhere on the row (not on an action button) toggles selection.
+    // Shift-click extends the range; Ctrl/Cmd-click also toggles (same as plain).
     const checkbox = row.querySelector('.dlv-row-check')
-    checkbox?.addEventListener('change', (e) => handleCheckboxClick(f.r2_key, e))
+    checkbox?.addEventListener('change', () => {
+      // Sync selected Set to the checkbox's native checked state
+      if (checkbox.checked) selected.add(f.r2_key)
+      else selected.delete(f.r2_key)
+      doRender()
+    })
     row.addEventListener('click', (e) => {
-      if (e.ctrlKey || e.metaKey || e.shiftKey) {
-        e.preventDefault()
-        const checkbox = row.querySelector('.dlv-row-check')
-        if (checkbox && !checkbox.matches(':disabled')) {
-          handleCheckboxClick(f.r2_key, { shiftKey: e.shiftKey, ctrlKey: e.ctrlKey || e.metaKey })
-        }
-      }
+      // Ignore clicks originating from action buttons inside the row
+      if (e.target.closest('.dlv-row-actions, .dlv-row-check-wrap')) return
+      e.preventDefault()
+      handleCheckboxClick(f.r2_key, { shiftKey: e.shiftKey })
     })
 
     // Attach action button handlers
@@ -334,37 +338,27 @@ function initRenderRows() {
   }
 }
 
-function handleCheckboxClick(key, e) {
-  const isShiftClick = e.shiftKey
-  const isCtrlClick = e.ctrlKey || e.metaKey
+let lastSelectedKey = null
 
-  if (isShiftClick) {
-    // Range selection
+function handleCheckboxClick(key, e) {
+  if (e.shiftKey && lastSelectedKey) {
+    // Extend range from lastSelectedKey to key
     const keys = files.map((f) => f.r2_key)
-    const idx = keys.indexOf(key)
-    if (idx >= 0) {
-      let lastIdx = -1
-      for (let i = 0; i < files.length; i++) {
-        const checkbox = rowCache.get(keys[i])?.querySelector('.dlv-row-check')
-        if (checkbox?.checked) lastIdx = i
-      }
-      if (lastIdx === -1) lastIdx = idx
-      const [start, end] = [Math.min(idx, lastIdx), Math.max(idx, lastIdx)]
-      for (let i = start; i <= end; i++) {
-        selected.add(keys[i])
-      }
+    const idx  = keys.indexOf(key)
+    const last = keys.indexOf(lastSelectedKey)
+    if (idx >= 0 && last >= 0) {
+      const [start, end] = [Math.min(idx, last), Math.max(idx, last)]
+      for (let i = start; i <= end; i++) selected.add(keys[i])
     }
-  } else if (isCtrlClick) {
-    // Toggle single
+  } else {
+    // Plain click or Ctrl/Cmd-click: toggle
     if (selected.has(key)) selected.delete(key)
     else selected.add(key)
-  } else {
-    // Single select
-    selected.clear()
-    selected.add(key)
+    lastSelectedKey = key
   }
 
   updateCheckboxesFromSelection()
+  doRender()
 }
 
 function updateCheckboxesFromSelection() {

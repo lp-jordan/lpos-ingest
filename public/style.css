@@ -566,6 +566,7 @@ button:focus-visible, a:focus-visible {
 .dlv-row-bar {
   background: var(--surface-3);
   border-radius: 999px;
+  display: none;
   height: 3px;
   margin-top: 6px;
   overflow: hidden;
