@@ -14,6 +14,9 @@
  *   • Offers a "Having trouble?" link that posts to /d/<token>/report-trouble
  *     so the LPOS user who created the delivery (and admins as fallback) get
  *     pinged in-app and via Slack DM.
+ *
+ * PERF: renderRows() now uses DOM caching and incremental updates instead of
+ * wholesale innerHTML replacement. Updates are batched via requestAnimationFrame.
  */
 
 const { token, project: projectName, client: clientName, label } = document.documentElement.dataset
@@ -48,8 +51,16 @@ const state = new Map()
 const errors = new Map()
 /** key → percent 0-100 (only meaningful while state === 'downloading') */
 const progress = new Map()
+/** Set of selected file keys for batch operations */
+const selected = new Set()
 /** Is the queue currently consuming items? */
 let queueRunning = false
+/** Is the queue paused? */
+let queuePaused = false
+/** Cached DOM row elements (key → row div) to avoid re-rendering */
+const rowCache = new Map()
+/** Pending render updates (batched with rAF) */
+let pendingRender = false
 
 // ── Header copy ────────────────────────────────────────────────────────────────
 
@@ -154,7 +165,7 @@ function updateDownloadAllBtn() {
   const remaining = c.pending
   dlBtn.disabled = remaining === 0 || queueRunning
   dlBtn.textContent = queueRunning
-    ? 'Downloading…'
+    ? queuePaused ? 'Paused…' : 'Downloading…'
     : remaining === 0
       ? 'All files downloaded'
       : remaining < files.length
@@ -162,7 +173,19 @@ function updateDownloadAllBtn() {
         : `Download all ${files.length} files`
 }
 
-dlBtn.addEventListener('click', () => { runQueue() })
+dlBtn.addEventListener('click', () => {
+  if (queueRunning && !queuePaused) {
+    // Pause the queue
+    queuePaused = true
+    updateDownloadAllBtn()
+  } else {
+    // Resume or start the queue
+    queuePaused = false
+    updateDownloadAllBtn()
+    runQueue()
+  }
+})
+
 retryBtn.addEventListener('click', () => {
   // Reset failed files to pending so the queue picks them up
   for (const [key, s] of state) {
@@ -171,7 +194,7 @@ retryBtn.addEventListener('click', () => {
       errors.delete(key)
     }
   }
-  renderRows()
+  scheduleRender()
   runQueue()
 })
 
@@ -218,72 +241,207 @@ helpForm.addEventListener('submit', async (e) => {
   }
 })
 
-// ── File list rendering ────────────────────────────────────────────────────────
+// ── File list rendering (incremental, batched) ────────────────────────────
 
-function renderRows() {
+/** Schedule a render update (batched via requestAnimationFrame) */
+function scheduleRender() {
+  if (pendingRender) return
+  pendingRender = true
+  requestAnimationFrame(() => {
+    pendingRender = false
+    doRender()
+  })
+}
+
+/** Build initial row elements once at load time */
+function initRenderRows() {
   if (!files.length) {
     list.innerHTML = '<p class="files-empty">No files in this delivery.</p>'
     return
   }
 
-  list.innerHTML = files.map((f) => {
-    const s    = state.get(f.r2_key) || 'pending'
-    const pct  = Math.round(progress.get(f.r2_key) || 0)
-    const err  = errors.get(f.r2_key)
-    const stateClass = `dlv-row dlv-row--${s}`
-    return `
-      <div class="${stateClass}" data-key="${escHtml(f.r2_key)}">
-        <div class="dlv-row-icon">
-          ${f.thumbnail_url
-            ? `<img src="${escHtml(f.thumbnail_url)}" alt="" class="dlv-row-thumb" />`
-            : iconForMime(f.mime_type)}
+  list.innerHTML = ''
+  for (const f of files) {
+    const row = document.createElement('div')
+    row.className = 'dlv-row'
+    row.dataset.key = f.r2_key
+    row.innerHTML = `
+      <label class="dlv-row-check-wrap">
+        <input type="checkbox" class="dlv-row-check" data-key="${escHtml(f.r2_key)}" />
+      </label>
+      <div class="dlv-row-icon">
+        ${f.thumbnail_url
+          ? `<img src="${escHtml(f.thumbnail_url)}" alt="" class="dlv-row-thumb" />`
+          : iconForMime(f.mime_type)}
+      </div>
+      <div class="dlv-row-info">
+        <div class="dlv-row-name" title="${escHtml(f.filename)}">${escHtml(f.filename)}</div>
+        <div class="dlv-row-meta">
+          <span>${formatSize(f.file_size)} · ${extLabel(f.filename)}</span>
+          <span class="dlv-row-status-placeholder"></span>
         </div>
-        <div class="dlv-row-info">
-          <div class="dlv-row-name" title="${escHtml(f.filename)}">${escHtml(f.filename)}</div>
-          <div class="dlv-row-meta">
-            <span>${formatSize(f.file_size)} · ${extLabel(f.filename)}</span>
-            ${statusBadge(s, pct, err)}
-          </div>
-          ${s === 'downloading' ? `<div class="dlv-row-bar"><div class="dlv-row-bar-fill" style="width:${pct}%"></div></div>` : ''}
+        <div class="dlv-row-bar" style="display: none;">
+          <div class="dlv-row-bar-fill" style="width: 0%"></div>
         </div>
-        ${renderRowAction(f, s)}
+      </div>
+      <div class="dlv-row-actions">
+        <button class="dlv-row-dl" data-action="download" data-key="${escHtml(f.r2_key)}" title="Download this file" aria-label="Download this file">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+        </button>
       </div>
     `
-  }).join('')
+    list.appendChild(row)
+    rowCache.set(f.r2_key, row)
 
-  list.querySelectorAll('.dlv-row-action[data-action="retry"]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const key = btn.dataset.key
-      state.set(key, 'pending')
-      errors.delete(key)
-      renderRows()
-      runQueue()
+    // Attach checkbox handler
+    const checkbox = row.querySelector('.dlv-row-check')
+    checkbox?.addEventListener('change', (e) => handleCheckboxClick(f.r2_key, e))
+    row.addEventListener('click', (e) => {
+      if (e.ctrlKey || e.metaKey || e.shiftKey) {
+        e.preventDefault()
+        const checkbox = row.querySelector('.dlv-row-check')
+        if (checkbox && !checkbox.matches(':disabled')) {
+          handleCheckboxClick(f.r2_key, { shiftKey: e.shiftKey, ctrlKey: e.ctrlKey || e.metaKey })
+        }
+      }
     })
-  })
 
-  list.querySelectorAll('.dlv-row-action[data-action="download"]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const key = btn.dataset.key
-      // Bypass the queue — download this one file ad hoc. Use the same chunked
-      // path so the retry/streaming behavior is consistent.
-      const file = files.find((f) => f.r2_key === key)
+    // Attach action button handlers
+    const dlBtn = row.querySelector('[data-action="download"]')
+    dlBtn?.addEventListener('click', () => {
+      const file = files.find((x) => x.r2_key === f.r2_key)
       if (file) downloadOne(file)
     })
-  })
+  }
+
+  doRender()
+
+  // Attach select-all handler
+  const selectAllBtn = document.querySelector('#select-all-files')
+  if (selectAllBtn) {
+    selectAllBtn.addEventListener('change', (e) => {
+      if (e.target.checked) {
+        selected.clear()
+        for (const f of files) selected.add(f.r2_key)
+      } else {
+        selected.clear()
+      }
+      updateCheckboxesFromSelection()
+      doRender()
+    })
+  }
+}
+
+function handleCheckboxClick(key, e) {
+  const isShiftClick = e.shiftKey
+  const isCtrlClick = e.ctrlKey || e.metaKey
+
+  if (isShiftClick) {
+    // Range selection
+    const keys = files.map((f) => f.r2_key)
+    const idx = keys.indexOf(key)
+    if (idx >= 0) {
+      let lastIdx = -1
+      for (let i = 0; i < files.length; i++) {
+        const checkbox = rowCache.get(keys[i])?.querySelector('.dlv-row-check')
+        if (checkbox?.checked) lastIdx = i
+      }
+      if (lastIdx === -1) lastIdx = idx
+      const [start, end] = [Math.min(idx, lastIdx), Math.max(idx, lastIdx)]
+      for (let i = start; i <= end; i++) {
+        selected.add(keys[i])
+      }
+    }
+  } else if (isCtrlClick) {
+    // Toggle single
+    if (selected.has(key)) selected.delete(key)
+    else selected.add(key)
+  } else {
+    // Single select
+    selected.clear()
+    selected.add(key)
+  }
+
+  updateCheckboxesFromSelection()
+}
+
+function updateCheckboxesFromSelection() {
+  for (const [key, row] of rowCache) {
+    const checkbox = row.querySelector('.dlv-row-check')
+    if (checkbox) checkbox.checked = selected.has(key)
+  }
+}
+
+/** Incrementally update row display (no wholesale re-render) */
+function doRender() {
+  if (!files.length) return
+
+  for (const f of files) {
+    const row = rowCache.get(f.r2_key)
+    if (!row) continue
+
+    const s = state.get(f.r2_key) || 'pending'
+    const pct = Math.round(progress.get(f.r2_key) || 0)
+    const err = errors.get(f.r2_key)
+
+    // Update row state class
+    row.className = `dlv-row dlv-row--${s}${selected.has(f.r2_key) ? ' dlv-row--selected' : ''}`
+
+    // Update status badge/icon
+    const statusEl = row.querySelector('.dlv-row-status-placeholder')
+    if (statusEl) {
+      statusEl.innerHTML = getStatusHtml(s, pct, err)
+    }
+
+    // Update progress bar visibility and value
+    const bar = row.querySelector('.dlv-row-bar')
+    const barFill = row.querySelector('.dlv-row-bar-fill')
+    if (s === 'downloading') {
+      bar.style.display = ''
+      if (barFill) barFill.style.width = `${pct}%`
+    } else {
+      bar.style.display = 'none'
+    }
+
+    // Update action button(s)
+    const actionDiv = row.querySelector('.dlv-row-actions')
+    if (actionDiv) {
+      actionDiv.innerHTML = getActionHtml(f, s)
+      const dlBtn = actionDiv.querySelector('[data-action="download"]')
+      if (dlBtn) {
+        dlBtn.addEventListener('click', () => {
+          const file = files.find((x) => x.r2_key === f.r2_key)
+          if (file) downloadOne(file)
+        })
+      }
+      const retryBtn = actionDiv.querySelector('[data-action="retry"]')
+      if (retryBtn) {
+        retryBtn.addEventListener('click', () => {
+          state.set(f.r2_key, 'pending')
+          errors.delete(f.r2_key)
+          selected.delete(f.r2_key)
+          scheduleRender()
+          runQueue()
+        })
+      }
+    }
+  }
 
   updateDownloadAllBtn()
   renderOverallProgress()
 }
 
-function statusBadge(s, pct, err) {
-  if (s === 'pending')     return ''
+function getStatusHtml(s, pct, err) {
+  if (s === 'pending') return ''
   if (s === 'downloading') return `<span class="dlv-row-badge dlv-row-badge--active">${pct}%</span>`
-  if (s === 'complete')    return `<span class="dlv-row-badge dlv-row-badge--done">Downloaded</span>`
-  if (s === 'failed')      return `<span class="dlv-row-badge dlv-row-badge--failed" title="${escHtml(err || '')}">Failed</span>`
+  if (s === 'complete') return `<span class="dlv-row-badge dlv-row-badge--done">Downloaded</span>`
+  if (s === 'failed') return `<span class="dlv-row-badge dlv-row-badge--failed" title="${escHtml(err || '')}">Failed</span>`
   return ''
 }
 
-function renderRowAction(f, s) {
+function getActionHtml(f, s) {
   if (s === 'complete') {
     return '<span class="dlv-row-check-icon" aria-hidden="true">✓</span>'
   }
@@ -291,22 +449,36 @@ function renderRowAction(f, s) {
     return `<button class="dlv-row-action dlv-row-action--retry" data-action="retry" data-key="${escHtml(f.r2_key)}">Retry</button>`
   }
   if (s === 'pending') {
-    return `<button class="dlv-row-action" data-action="download" data-key="${escHtml(f.r2_key)}" title="Download this file now">Download</button>`
+    return `<button class="dlv-row-dl" data-action="download" data-key="${escHtml(f.r2_key)}" title="Download this file" aria-label="Download this file">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+      </svg>
+    </button>`
   }
   return ''
 }
+
+// Legacy function name kept for compat with other calls
+function renderRows() {
+  scheduleRender()
+}
+
 
 // ── Download mechanics ─────────────────────────────────────────────────────────
 
 async function runQueue() {
   if (queueRunning) return
   queueRunning = true
+  queuePaused = false
   updateDownloadAllBtn()
   renderOverallProgress()
 
   try {
     for (const f of files) {
+      // Skip if not pending, or if paused and not manually triggered
       if (state.get(f.r2_key) !== 'pending') continue
+      if (queuePaused) break
+
       await downloadOne(f)
     }
   } finally {
@@ -315,7 +487,9 @@ async function runQueue() {
     renderOverallProgress()
 
     const c = countByState()
-    if (c.failed > 0) {
+    if (queuePaused) {
+      // Don't show toast if paused — user will resume
+    } else if (c.failed > 0) {
       showToast(`${c.failed} file${c.failed === 1 ? '' : 's'} failed — Retry available`, 'error')
     } else if (c.complete === files.length && files.length > 0) {
       showToast('All files downloaded', 'success')
@@ -328,7 +502,7 @@ async function downloadOne(file) {
   state.set(file.r2_key, 'downloading')
   progress.set(file.r2_key, 0)
   errors.delete(file.r2_key)
-  renderRows()
+  scheduleRender()
 
   let writer
   try {
@@ -340,7 +514,7 @@ async function downloadOne(file) {
   } catch (err) {
     state.set(file.r2_key, 'failed')
     errors.set(file.r2_key, `Couldn't start download: ${err.message || err}`)
-    renderRows()
+    scheduleRender()
     return
   }
 
@@ -348,12 +522,20 @@ async function downloadOne(file) {
   let written = 0
   try {
     for (let start = 0; start < total; start += CHUNK_SIZE) {
+      if (queuePaused) {
+        // Pause — wait until resumed
+        while (queuePaused && state.get(file.r2_key) === 'downloading') {
+          await sleep(100)
+        }
+        if (state.get(file.r2_key) !== 'downloading') break // Cancelled
+      }
+
       const end = Math.min(start + CHUNK_SIZE - 1, total - 1)
       const buf = await fetchChunkWithRetry(file.r2_key, start, end)
       await writer.write(new Uint8Array(buf))
       written += buf.byteLength
       progress.set(file.r2_key, Math.round((written / total) * 100))
-      renderRows()
+      scheduleRender()
     }
     await writer.close()
     state.set(file.r2_key, 'complete')
@@ -364,7 +546,7 @@ async function downloadOne(file) {
     state.set(file.r2_key, 'failed')
     errors.set(file.r2_key, err.message || String(err))
   }
-  renderRows()
+  scheduleRender()
 }
 
 async function fetchChunkWithRetry(key, start, end) {
@@ -428,7 +610,7 @@ async function loadFiles() {
     return
   }
 
-  renderRows()
+  initRenderRows()
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
