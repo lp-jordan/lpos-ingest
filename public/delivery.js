@@ -1,20 +1,96 @@
+/**
+ * Delivery page client
+ *
+ * Replaces the old per-file <a download> trigger with a smart queue that:
+ *   • Downloads files sequentially through StreamSaver (true streaming-to-disk).
+ *   • Splits each file into 25 MB Range-requested chunks. A failed chunk is
+ *     retried in place (3 attempts, exponential backoff) without re-downloading
+ *     completed bytes.
+ *   • Tracks per-file completion in localStorage keyed by delivery token, so
+ *     a recipient who closes and reopens the page sees what they've already
+ *     downloaded.
+ *   • Surfaces failures clearly with a per-file Retry and an overall
+ *     "Retry failed (N)" action.
+ *   • Offers a "Having trouble?" link that posts to /d/<token>/report-trouble
+ *     so the LPOS user who created the delivery (and admins as fallback) get
+ *     pinged in-app and via Slack DM.
+ */
+
 const { token, project: projectName, client: clientName, label } = document.documentElement.dataset
-const list        = document.getElementById('delivery-list')
-const selectAll   = document.getElementById('select-all')
-const dlBtn       = document.getElementById('download-selected')
-const headingEl   = document.getElementById('delivery-heading')
-const subtextEl   = document.getElementById('delivery-subtext')
-const toast       = document.getElementById('toast')
+
+const list                 = document.getElementById('delivery-list')
+const dlBtn                = document.getElementById('download-all')
+const retryBtn             = document.getElementById('retry-failed')
+const overallProgressWrap  = document.getElementById('overall-progress')
+const overallBar           = document.getElementById('overall-progress-bar')
+const overallLabel         = document.getElementById('overall-progress-label')
+const headingEl            = document.getElementById('delivery-heading')
+const subtextEl            = document.getElementById('delivery-subtext')
+const helpLink             = document.getElementById('trouble-link')
+const helpModal            = document.getElementById('trouble-modal')
+const helpForm             = document.getElementById('trouble-form')
+const helpTextarea         = document.getElementById('trouble-message')
+const helpStateLine        = document.getElementById('trouble-state-line')
+const helpCancel           = document.getElementById('trouble-cancel')
+const helpSubmit           = document.getElementById('trouble-submit')
+const toast                = document.getElementById('toast')
+
+const CHUNK_SIZE         = 25 * 1024 * 1024    // 25 MB per Range request
+const CHUNK_RETRIES      = 3
+const CHUNK_BACKOFF_MS   = [1000, 2000, 4000]   // attempt 1, 2, 3
+const LOCAL_STORAGE_KEY  = `lpos-delivery-${token}`
 
 let toastTimer = null
 let files = []
-const selected = new Set()
+/** key → 'pending' | 'downloading' | 'complete' | 'failed' */
+const state = new Map()
+/** key → last error message (only set when state === 'failed') */
+const errors = new Map()
+/** key → percent 0-100 (only meaningful while state === 'downloading') */
+const progress = new Map()
+/** Is the queue currently consuming items? */
+let queueRunning = false
 
 // ── Header copy ────────────────────────────────────────────────────────────────
 
 if (clientName) headingEl.textContent = `Hi, ${clientName}!`
-
 subtextEl.textContent = label || ''
+
+// ── Persistence ────────────────────────────────────────────────────────────────
+//
+// localStorage shape: { completed: ["r2_key", ...], lastUpdated: ISO }
+// Stored per delivery token so two different deliveries opened in the same
+// browser don't bleed state. Cleared if the server returns 410 (link expired
+// or revoked) so a stale "downloaded" check doesn't mislead future recipients.
+
+function loadCompletedFromStorage() {
+  try {
+    const raw = localStorage.getItem(LOCAL_STORAGE_KEY)
+    if (!raw) return new Set()
+    const parsed = JSON.parse(raw)
+    return new Set(Array.isArray(parsed.completed) ? parsed.completed : [])
+  } catch {
+    return new Set()
+  }
+}
+
+function persistCompleted() {
+  try {
+    const completed = []
+    for (const [key, s] of state) if (s === 'complete') completed.push(key)
+    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify({
+      completed,
+      lastUpdated: new Date().toISOString(),
+    }))
+  } catch {
+    // Storage full or disabled — silently degrade, recipient just won't see
+    // remembered state on reopen.
+  }
+}
+
+function clearStorage() {
+  try { localStorage.removeItem(LOCAL_STORAGE_KEY) } catch { /* ignore */ }
+}
 
 // ── Toast ──────────────────────────────────────────────────────────────────────
 
@@ -25,117 +101,334 @@ function showToast(msg, type = '') {
   toastTimer = setTimeout(() => { toast.className = 'toast' }, 3200)
 }
 
-// ── Selection state ────────────────────────────────────────────────────────────
+// ── State queries ──────────────────────────────────────────────────────────────
 
-function updateSelectionState() {
-  const count = selected.size
-  dlBtn.disabled = count === 0
-  dlBtn.textContent = count > 1
-    ? `Download ${count} files`
-    : count === 1 ? 'Download file' : 'Download selected'
-
-  const icon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
-  </svg>`
-  dlBtn.innerHTML = `${icon} ${dlBtn.textContent}`
-
-  selectAll.indeterminate = count > 0 && count < files.length
-  selectAll.checked = files.length > 0 && count === files.length
-
-  document.querySelectorAll('.dlv-row-check').forEach(cb => {
-    cb.checked = selected.has(cb.dataset.key)
-  })
+function countByState() {
+  const counts = { pending: 0, downloading: 0, complete: 0, failed: 0 }
+  for (const s of state.values()) counts[s]++
+  return counts
 }
 
-selectAll.addEventListener('change', () => {
-  if (selectAll.checked) {
-    files.forEach(f => selected.add(f.r2_key))
-  } else {
-    selected.clear()
+function queueSummary() {
+  const c = countByState()
+  const total = files.length
+  const bits = [`${c.complete} of ${total} complete`]
+  if (c.failed)      bits.push(`${c.failed} failed`)
+  if (c.downloading) bits.push('1 in progress')
+  if (c.pending)     bits.push(`${c.pending} pending`)
+  return bits.join(' · ')
+}
+
+function renderOverallProgress() {
+  const c = countByState()
+  const total = files.length
+  if (!total) {
+    overallProgressWrap.hidden = true
+    return
   }
-  updateSelectionState()
-})
+  const anyActive = c.downloading > 0 || c.complete > 0 || c.failed > 0
+  if (!anyActive) {
+    overallProgressWrap.hidden = true
+    return
+  }
+  overallProgressWrap.hidden = false
+  // Each completed file contributes 100; in-progress contributes its percent.
+  let pctSum = c.complete * 100
+  for (const [key, s] of state) {
+    if (s === 'downloading') pctSum += progress.get(key) || 0
+  }
+  const overall = Math.round(pctSum / total)
+  overallBar.style.width = `${overall}%`
+  overallLabel.textContent = queueSummary()
 
-// ── Download ───────────────────────────────────────────────────────────────────
-
-function triggerDownload(key, filename) {
-  const a = document.createElement('a')
-  a.href = `/d/${token}/download?key=${encodeURIComponent(key)}`
-  a.download = filename
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
+  // Retry button visibility — show only when there are completed-with-failures
+  // and no active downloads (otherwise the user might retry mid-flight).
+  retryBtn.hidden = !(c.failed > 0 && c.downloading === 0)
+  retryBtn.textContent = c.failed > 1 ? `Retry ${c.failed} failed` : 'Retry failed'
 }
 
-dlBtn.addEventListener('click', () => {
-  const keys = [...selected]
-  if (!keys.length) return
-  keys.forEach(key => {
-    const file = files.find(f => f.r2_key === key)
-    if (file) triggerDownload(key, file.filename)
-  })
-  showToast(
-    keys.length === 1 ? 'Download started' : `${keys.length} downloads started`,
-    'success'
-  )
+// ── Download button ────────────────────────────────────────────────────────────
+
+function updateDownloadAllBtn() {
+  const c = countByState()
+  const remaining = c.pending
+  dlBtn.disabled = remaining === 0 || queueRunning
+  dlBtn.textContent = queueRunning
+    ? 'Downloading…'
+    : remaining === 0
+      ? 'All files downloaded'
+      : remaining < files.length
+        ? `Resume (${remaining} left)`
+        : `Download all ${files.length} files`
+}
+
+dlBtn.addEventListener('click', () => { runQueue() })
+retryBtn.addEventListener('click', () => {
+  // Reset failed files to pending so the queue picks them up
+  for (const [key, s] of state) {
+    if (s === 'failed') {
+      state.set(key, 'pending')
+      errors.delete(key)
+    }
+  }
+  renderRows()
+  runQueue()
 })
 
-// ── File list ──────────────────────────────────────────────────────────────────
+// ── Trouble report modal ───────────────────────────────────────────────────────
 
-function renderFiles() {
+helpLink.addEventListener('click', (e) => {
+  e.preventDefault()
+  helpStateLine.textContent = queueSummary() || 'No downloads started yet'
+  helpTextarea.value = ''
+  helpModal.hidden = false
+  helpTextarea.focus()
+})
+
+helpCancel.addEventListener('click', () => { helpModal.hidden = true })
+
+helpModal.addEventListener('click', (e) => {
+  if (e.target === helpModal) helpModal.hidden = true
+})
+
+helpForm.addEventListener('submit', async (e) => {
+  e.preventDefault()
+  helpSubmit.disabled = true
+  helpSubmit.textContent = 'Sending…'
+  try {
+    const res = await fetch(`/d/${token}/report-trouble`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({
+        description:  helpTextarea.value.trim() || null,
+        queueSummary: queueSummary() || null,
+      }),
+    })
+    if (res.status === 429) {
+      throw new Error('Already sent recently — please wait a few minutes before trying again.')
+    }
+    if (!res.ok) throw new Error('Network error — please try again.')
+    helpModal.hidden = true
+    showToast('Thanks — someone will reach out shortly.', 'success')
+  } catch (err) {
+    showToast(err.message || 'Could not send the report.', 'error')
+  } finally {
+    helpSubmit.disabled = false
+    helpSubmit.textContent = 'Send'
+  }
+})
+
+// ── File list rendering ────────────────────────────────────────────────────────
+
+function renderRows() {
   if (!files.length) {
     list.innerHTML = '<p class="files-empty">No files in this delivery.</p>'
     return
   }
 
-  list.innerHTML = files.map(f => `
-    <div class="dlv-row" data-key="${escHtml(f.r2_key)}">
-      <label class="dlv-row-check-wrap">
-        <input type="checkbox" class="dlv-row-check" data-key="${escHtml(f.r2_key)}" />
-      </label>
-      <div class="dlv-row-icon">
-        ${f.thumbnail_url
-          ? `<img src="${escHtml(f.thumbnail_url)}" alt="" class="dlv-row-thumb" onerror="this.parentElement.innerHTML='${iconForMime(f.mime_type).replace(/"/g, '&quot;').replace(/'/g, "\\'").replace(/\n/g, '')}'"/>`
-          : iconForMime(f.mime_type)
-        }
+  list.innerHTML = files.map((f) => {
+    const s    = state.get(f.r2_key) || 'pending'
+    const pct  = Math.round(progress.get(f.r2_key) || 0)
+    const err  = errors.get(f.r2_key)
+    const stateClass = `dlv-row dlv-row--${s}`
+    return `
+      <div class="${stateClass}" data-key="${escHtml(f.r2_key)}">
+        <div class="dlv-row-icon">
+          ${f.thumbnail_url
+            ? `<img src="${escHtml(f.thumbnail_url)}" alt="" class="dlv-row-thumb" />`
+            : iconForMime(f.mime_type)}
+        </div>
+        <div class="dlv-row-info">
+          <div class="dlv-row-name" title="${escHtml(f.filename)}">${escHtml(f.filename)}</div>
+          <div class="dlv-row-meta">
+            <span>${formatSize(f.file_size)} · ${extLabel(f.filename)}</span>
+            ${statusBadge(s, pct, err)}
+          </div>
+          ${s === 'downloading' ? `<div class="dlv-row-bar"><div class="dlv-row-bar-fill" style="width:${pct}%"></div></div>` : ''}
+        </div>
+        ${renderRowAction(f, s)}
       </div>
-      <div class="dlv-row-info">
-        <div class="dlv-row-name" title="${escHtml(f.filename)}">${escHtml(f.filename)}</div>
-        <div class="dlv-row-meta">${formatSize(f.file_size)} &middot; ${extLabel(f.filename)}</div>
-      </div>
-      <button class="dlv-row-dl" title="Download ${escHtml(f.filename)}" data-key="${escHtml(f.r2_key)}" data-name="${escHtml(f.filename)}">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
-        </svg>
-      </button>
-    </div>
-  `).join('')
+    `
+  }).join('')
 
-  list.querySelectorAll('.dlv-row-check').forEach(cb => {
-    cb.addEventListener('change', () => {
-      if (cb.checked) selected.add(cb.dataset.key)
-      else selected.delete(cb.dataset.key)
-      updateSelectionState()
-    })
-  })
-
-  list.querySelectorAll('.dlv-row-dl').forEach(btn => {
+  list.querySelectorAll('.dlv-row-action[data-action="retry"]').forEach((btn) => {
     btn.addEventListener('click', () => {
-      triggerDownload(btn.dataset.key, btn.dataset.name)
-      showToast('Download started', 'success')
+      const key = btn.dataset.key
+      state.set(key, 'pending')
+      errors.delete(key)
+      renderRows()
+      runQueue()
     })
   })
+
+  list.querySelectorAll('.dlv-row-action[data-action="download"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const key = btn.dataset.key
+      // Bypass the queue — download this one file ad hoc. Use the same chunked
+      // path so the retry/streaming behavior is consistent.
+      const file = files.find((f) => f.r2_key === key)
+      if (file) downloadOne(file)
+    })
+  })
+
+  updateDownloadAllBtn()
+  renderOverallProgress()
 }
+
+function statusBadge(s, pct, err) {
+  if (s === 'pending')     return ''
+  if (s === 'downloading') return `<span class="dlv-row-badge dlv-row-badge--active">${pct}%</span>`
+  if (s === 'complete')    return `<span class="dlv-row-badge dlv-row-badge--done">Downloaded</span>`
+  if (s === 'failed')      return `<span class="dlv-row-badge dlv-row-badge--failed" title="${escHtml(err || '')}">Failed</span>`
+  return ''
+}
+
+function renderRowAction(f, s) {
+  if (s === 'complete') {
+    return '<span class="dlv-row-check-icon" aria-hidden="true">✓</span>'
+  }
+  if (s === 'failed') {
+    return `<button class="dlv-row-action dlv-row-action--retry" data-action="retry" data-key="${escHtml(f.r2_key)}">Retry</button>`
+  }
+  if (s === 'pending') {
+    return `<button class="dlv-row-action" data-action="download" data-key="${escHtml(f.r2_key)}" title="Download this file now">Download</button>`
+  }
+  return ''
+}
+
+// ── Download mechanics ─────────────────────────────────────────────────────────
+
+async function runQueue() {
+  if (queueRunning) return
+  queueRunning = true
+  updateDownloadAllBtn()
+  renderOverallProgress()
+
+  try {
+    for (const f of files) {
+      if (state.get(f.r2_key) !== 'pending') continue
+      await downloadOne(f)
+    }
+  } finally {
+    queueRunning = false
+    updateDownloadAllBtn()
+    renderOverallProgress()
+
+    const c = countByState()
+    if (c.failed > 0) {
+      showToast(`${c.failed} file${c.failed === 1 ? '' : 's'} failed — Retry available`, 'error')
+    } else if (c.complete === files.length && files.length > 0) {
+      showToast('All files downloaded', 'success')
+    }
+  }
+}
+
+async function downloadOne(file) {
+  if (state.get(file.r2_key) === 'complete') return
+  state.set(file.r2_key, 'downloading')
+  progress.set(file.r2_key, 0)
+  errors.delete(file.r2_key)
+  renderRows()
+
+  let writer
+  try {
+    const stream = await window.streamSaver.createWriteStream(file.filename, {
+      size:     file.file_size,
+      mimeType: file.mime_type,
+    })
+    writer = stream.getWriter()
+  } catch (err) {
+    state.set(file.r2_key, 'failed')
+    errors.set(file.r2_key, `Couldn't start download: ${err.message || err}`)
+    renderRows()
+    return
+  }
+
+  const total = file.file_size
+  let written = 0
+  try {
+    for (let start = 0; start < total; start += CHUNK_SIZE) {
+      const end = Math.min(start + CHUNK_SIZE - 1, total - 1)
+      const buf = await fetchChunkWithRetry(file.r2_key, start, end)
+      await writer.write(new Uint8Array(buf))
+      written += buf.byteLength
+      progress.set(file.r2_key, Math.round((written / total) * 100))
+      renderRows()
+    }
+    await writer.close()
+    state.set(file.r2_key, 'complete')
+    progress.delete(file.r2_key)
+    persistCompleted()
+  } catch (err) {
+    try { await writer.abort() } catch { /* ignore */ }
+    state.set(file.r2_key, 'failed')
+    errors.set(file.r2_key, err.message || String(err))
+  }
+  renderRows()
+}
+
+async function fetchChunkWithRetry(key, start, end) {
+  const url = `/d/${token}/download?key=${encodeURIComponent(key)}`
+  let lastErr
+  for (let attempt = 0; attempt < CHUNK_RETRIES; attempt++) {
+    try {
+      const res = await fetch(url, {
+        headers: { Range: `bytes=${start}-${end}` },
+      })
+      if (res.status === 410) {
+        // Link expired or revoked — no point retrying; also wipe persisted state.
+        clearStorage()
+        throw new Error('This delivery link has expired.')
+      }
+      if (!(res.status === 206 || res.status === 200)) {
+        throw new Error(`HTTP ${res.status}`)
+      }
+      return await res.arrayBuffer()
+    } catch (err) {
+      lastErr = err
+      if (attempt < CHUNK_RETRIES - 1) {
+        await sleep(CHUNK_BACKOFF_MS[attempt])
+      }
+    }
+  }
+  throw lastErr || new Error('chunk fetch failed')
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+// ── Load files ─────────────────────────────────────────────────────────────────
 
 async function loadFiles() {
   const res = await fetch(`/d/${token}/files`)
+  if (res.status === 410) {
+    clearStorage()
+    list.innerHTML = '<p class="files-empty">This delivery link has expired.</p>'
+    return
+  }
   if (!res.ok) {
     list.innerHTML = '<p class="files-empty">Could not load files.</p>'
     return
   }
   files = await res.json()
-  renderFiles()
-  updateSelectionState()
+
+  // Seed per-file state — completed entries from localStorage start as 'complete',
+  // everything else starts as 'pending'.
+  const completed = loadCompletedFromStorage()
+  for (const f of files) {
+    state.set(f.r2_key, completed.has(f.r2_key) ? 'complete' : 'pending')
+  }
+
+  // StreamSaver-unsupported browser fallback — degrade with a clear message.
+  // The recipient can still hit "Having trouble?" to ping us.
+  if (!window.streamSaver || !window.streamSaver.isSupported()) {
+    list.innerHTML = '<p class="files-empty">Your browser doesn\'t support streamed downloads. Try Chrome or Firefox on desktop, or use "Having trouble?" below to reach us.</p>'
+    dlBtn.disabled = true
+    return
+  }
+
+  renderRows()
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────

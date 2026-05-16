@@ -107,15 +107,21 @@ app.use(express.json())
 async function initDeliveryTables() {
   await db.query(`
     CREATE TABLE IF NOT EXISTS delivery_links (
-      token        TEXT PRIMARY KEY,
-      project_name TEXT NOT NULL,
-      client_name  TEXT,
-      label        TEXT,
-      expires_at   TIMESTAMPTZ NOT NULL,
-      created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      revoked_at   TIMESTAMPTZ
+      token                 TEXT PRIMARY KEY,
+      project_name          TEXT NOT NULL,
+      client_name           TEXT,
+      label                 TEXT,
+      expires_at            TIMESTAMPTZ NOT NULL,
+      created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      revoked_at            TIMESTAMPTZ,
+      created_by_user_email TEXT,
+      project_id            TEXT
     )
   `)
+  // Idempotent ALTERs for existing deployments — Postgres supports IF NOT EXISTS
+  // on ADD COLUMN, so re-running these on a fresh DB is a no-op.
+  await db.query(`ALTER TABLE delivery_links ADD COLUMN IF NOT EXISTS created_by_user_email TEXT`)
+  await db.query(`ALTER TABLE delivery_links ADD COLUMN IF NOT EXISTS project_id            TEXT`)
   await db.query(`
     CREATE TABLE IF NOT EXISTS delivery_link_assets (
       id              SERIAL PRIMARY KEY,
@@ -285,7 +291,10 @@ app.get('/c/:token/download', async (req, res) => {
 
 // Create a delivery link
 app.post('/api/delivery', requireApiKey, async (req, res) => {
-  const { project_name, client_name, label, expires_at, assets } = req.body
+  const {
+    project_name, client_name, label, expires_at, assets,
+    created_by_user_email, project_id,
+  } = req.body
   if (!project_name || !expires_at || !Array.isArray(assets) || !assets.length) {
     return res.status(400).json({ error: 'project_name, expires_at, and assets are required' })
   }
@@ -298,9 +307,13 @@ app.post('/api/delivery', requireApiKey, async (req, res) => {
   const token = randomUUID()
 
   await db.query(
-    `INSERT INTO delivery_links (token, project_name, client_name, label, expires_at)
-     VALUES ($1, $2, $3, $4, $5)`,
-    [token, project_name, client_name || null, label || null, expires_at]
+    `INSERT INTO delivery_links
+       (token, project_name, client_name, label, expires_at, created_by_user_email, project_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [
+      token, project_name, client_name || null, label || null, expires_at,
+      created_by_user_email || null, project_id || null,
+    ]
   )
 
   for (const a of assets) {
@@ -503,6 +516,101 @@ app.get('/d/:token/download', async (req, res) => {
     'INSERT INTO delivery_link_access (token, ip, user_agent, file_key) VALUES ($1, $2, $3, $4)',
     [req.params.token, req.ip, req.headers['user-agent'] || null, key]
   ).catch(() => {})
+})
+
+// ── Delivery trouble report ───────────────────────────────────────────────────
+//
+// Public POST endpoint hit by the delivery page when a recipient submits the
+// "Having trouble?" form. The ingest server looks up the delivery's owner,
+// then forwards the report to the dashboard's internal endpoint, which
+// handles in-app notification + Slack DM fan-out.
+//
+// Rate limit: max 2 reports per token per 5-minute window, enforced in-memory.
+// More than enough for legitimate use; cheap and obvious spam guard.
+
+const TROUBLE_RATE_LIMIT = { max: 2, windowMs: 5 * 60_000 }
+const troubleReportTimes = new Map() // token → [unix_ms, unix_ms]
+
+function checkTroubleRateLimit(token) {
+  const now = Date.now()
+  const cutoff = now - TROUBLE_RATE_LIMIT.windowMs
+  const recent = (troubleReportTimes.get(token) ?? []).filter((t) => t > cutoff)
+  if (recent.length >= TROUBLE_RATE_LIMIT.max) return false
+  recent.push(now)
+  troubleReportTimes.set(token, recent)
+  return true
+}
+
+// Sweep stale rate-limit entries hourly so the map can't grow unbounded
+setInterval(() => {
+  const cutoff = Date.now() - TROUBLE_RATE_LIMIT.windowMs
+  for (const [token, times] of troubleReportTimes) {
+    const fresh = times.filter((t) => t > cutoff)
+    if (!fresh.length) troubleReportTimes.delete(token)
+    else troubleReportTimes.set(token, fresh)
+  }
+}, 60 * 60 * 1000)
+
+app.post('/d/:token/report-trouble', async (req, res) => {
+  const { token } = req.params
+  const { description, queueSummary } = req.body ?? {}
+
+  if (!checkTroubleRateLimit(token)) {
+    return res.status(429).json({ error: 'Too many reports — please wait a few minutes' })
+  }
+
+  // Look up the delivery — must be live (not revoked or expired) to accept reports
+  const link = await db.query(
+    `SELECT project_name, client_name, label, expires_at, revoked_at,
+            created_by_user_email, project_id
+     FROM delivery_links WHERE token = $1`,
+    [token]
+  )
+  if (!link.rows.length) return res.status(404).json({ error: 'Not found' })
+  const l = link.rows[0]
+  if (l.revoked_at || new Date(l.expires_at) < new Date()) {
+    return res.status(410).json({ error: 'Expired' })
+  }
+
+  const dashboardOrigin = (process.env.DASHBOARD_ORIGIN || '').replace(/\/$/, '')
+  const apiKey = process.env.INGEST_API_KEY
+  if (!dashboardOrigin || !apiKey) {
+    // Misconfigured — log loudly but still 200 so the recipient gets a clean
+    // confirmation. The recipient shouldn't see our infra issues.
+    console.error('[delivery-trouble] DASHBOARD_ORIGIN or INGEST_API_KEY missing — alert dropped')
+    return res.json({ ok: true })
+  }
+
+  const payload = {
+    deliveryToken:      token,
+    projectName:        l.project_name,
+    clientName:         l.client_name,
+    label:              l.label,
+    description:        typeof description === 'string' ? description.slice(0, 2000) : null,
+    queueSummary:       typeof queueSummary === 'string' ? queueSummary.slice(0, 200) : null,
+    userAgent:          req.headers['user-agent'] || null,
+    createdByUserEmail: l.created_by_user_email,
+    projectId:          l.project_id,
+  }
+
+  // Fire-and-forget — never block the recipient's request on dashboard latency.
+  // Failures are logged but the recipient still gets 200; their ack is what matters.
+  fetch(`${dashboardOrigin}/api/internal/delivery-trouble`, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
+    body:    JSON.stringify(payload),
+  })
+    .then(async (r) => {
+      if (!r.ok) {
+        const text = await r.text().catch(() => '(unreadable)')
+        console.error(`[delivery-trouble] dashboard returned ${r.status}: ${text}`)
+      }
+    })
+    .catch((err) => {
+      console.error('[delivery-trouble] forward to dashboard failed:', err)
+    })
+
+  res.json({ ok: true })
 })
 
 // ── Delivery sweep — purge expired links and their R2 objects ─────────────────

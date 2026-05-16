@@ -20,16 +20,21 @@
 
     <!-- Actions row -->
     <div class="delivery-actions">
-      <label class="delivery-select-all">
-        <input type="checkbox" id="select-all" />
-        <span>Select all</span>
-      </label>
-      <button class="delivery-download-btn" id="download-selected" disabled>
+      <button class="delivery-download-btn" id="download-all" disabled>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
         </svg>
-        Download selected
+        Download all
       </button>
+      <button class="delivery-retry-btn" id="retry-failed" hidden>
+        Retry failed
+      </button>
+    </div>
+
+    <!-- Overall progress -->
+    <div class="delivery-overall" id="overall-progress" hidden>
+      <div class="delivery-overall-bar"><div class="delivery-overall-fill" id="overall-progress-bar"></div></div>
+      <div class="delivery-overall-label" id="overall-progress-label"></div>
     </div>
 
     <!-- File list -->
@@ -41,11 +46,38 @@
     <!-- Expiry notice -->
     <p class="delivery-expiry" id="delivery-expiry">Available until {{EXPIRES}}</p>
 
+    <!-- Trouble link -->
+    <p class="delivery-trouble">
+      <a href="#" id="trouble-link">Having trouble?</a>
+    </p>
+
+  </div>
+
+  <!-- Trouble modal -->
+  <div class="trouble-modal" id="trouble-modal" hidden>
+    <div class="trouble-modal-card" role="dialog" aria-labelledby="trouble-title">
+      <h2 class="trouble-modal-title" id="trouble-title">Tell us what's going wrong</h2>
+      <p class="trouble-modal-state" id="trouble-state-line"></p>
+      <form id="trouble-form">
+        <textarea
+          id="trouble-message"
+          class="trouble-modal-textarea"
+          rows="4"
+          maxlength="2000"
+          placeholder="What's happening? (optional)"
+        ></textarea>
+        <div class="trouble-modal-actions">
+          <button type="button" class="trouble-modal-cancel" id="trouble-cancel">Cancel</button>
+          <button type="submit" class="trouble-modal-submit" id="trouble-submit">Send</button>
+        </div>
+      </form>
+    </div>
   </div>
 
   <!-- Toast -->
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
+  <script src="/streamsaver.js"></script>
   <script src="/delivery.js"></script>
 </body>
 </html>

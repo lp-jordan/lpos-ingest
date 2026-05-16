@@ -471,6 +471,142 @@ button:focus-visible, a:focus-visible {
 .dlv-row:hover .dlv-row-dl { opacity: 1; }
 .dlv-row-dl:hover { background: var(--surface-3); color: var(--accent); }
 
+/* ── Delivery retry button ────────────────────────────────────────────────────── */
+
+.delivery-retry-btn {
+  background: rgba(220, 80, 80, 0.12);
+  border: 1px solid rgba(220, 80, 80, 0.32);
+  border-radius: 8px;
+  color: #d05050;
+  cursor: pointer;
+  font-size: 0.83rem;
+  font-weight: 500;
+  padding: 6px 14px;
+}
+
+.delivery-retry-btn:hover {
+  background: rgba(220, 80, 80, 0.2);
+  border-color: rgba(220, 80, 80, 0.48);
+}
+
+/* ── Delivery overall progress strip ──────────────────────────────────────────── */
+
+.delivery-overall {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+
+.delivery-overall-bar {
+  background: var(--surface-3);
+  border-radius: 999px;
+  height: 6px;
+  overflow: hidden;
+  width: 100%;
+}
+
+.delivery-overall-fill {
+  background: var(--accent);
+  height: 100%;
+  transition: width 0.2s ease;
+  width: 0%;
+}
+
+.delivery-overall-label {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+/* ── Delivery per-row queue state ─────────────────────────────────────────────── */
+
+.dlv-row--downloading {
+  border-color: rgba(219, 175, 95, 0.48);
+}
+
+.dlv-row--complete {
+  opacity: 0.7;
+}
+
+.dlv-row--failed {
+  border-color: rgba(220, 80, 80, 0.48);
+  background: rgba(220, 80, 80, 0.04);
+}
+
+.dlv-row-bar {
+  background: var(--surface-3);
+  border-radius: 999px;
+  height: 3px;
+  margin-top: 6px;
+  overflow: hidden;
+  width: 100%;
+}
+
+.dlv-row-bar-fill {
+  background: var(--accent);
+  height: 100%;
+  transition: width 0.15s linear;
+  width: 0%;
+}
+
+.dlv-row-badge {
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 500;
+  margin-left: 8px;
+  padding: 1px 8px;
+}
+
+.dlv-row-badge--active {
+  background: rgba(219, 175, 95, 0.22);
+  color: var(--accent-strong);
+}
+
+.dlv-row-badge--done {
+  background: rgba(70, 170, 110, 0.18);
+  color: #46aa6e;
+}
+
+.dlv-row-badge--failed {
+  background: rgba(220, 80, 80, 0.18);
+  color: #d05050;
+}
+
+.dlv-row-action {
+  background: var(--surface-3);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  cursor: pointer;
+  flex-shrink: 0;
+  font-size: 0.78rem;
+  padding: 5px 12px;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.dlv-row-action:hover {
+  background: var(--surface-2);
+  border-color: var(--line-strong);
+}
+
+.dlv-row-action--retry {
+  background: rgba(220, 80, 80, 0.12);
+  border-color: rgba(220, 80, 80, 0.32);
+  color: #d05050;
+}
+
+.dlv-row-action--retry:hover {
+  background: rgba(220, 80, 80, 0.2);
+  border-color: rgba(220, 80, 80, 0.48);
+}
+
+.dlv-row-check-icon {
+  color: #46aa6e;
+  font-size: 1.1rem;
+  flex-shrink: 0;
+  padding: 0 12px;
+}
+
 /* ── Delivery expiry notice ───────────────────────────────────────────────────── */
 
 .delivery-expiry {
@@ -479,4 +615,120 @@ button:focus-visible, a:focus-visible {
   letter-spacing: 0.03em;
   text-align: center;
   margin: 0;
+}
+
+/* ── Delivery trouble link + modal ────────────────────────────────────────────── */
+
+.delivery-trouble {
+  margin: 16px 0 0;
+  text-align: center;
+}
+
+.delivery-trouble a {
+  color: var(--muted-soft);
+  font-size: 0.78rem;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 3px;
+}
+
+.delivery-trouble a:hover {
+  color: var(--muted);
+  text-decoration-style: solid;
+}
+
+.trouble-modal {
+  align-items: center;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 20px;
+  position: fixed;
+  z-index: 100;
+}
+
+.trouble-modal[hidden] {
+  display: none;
+}
+
+.trouble-modal-card {
+  background: var(--surface-1);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: var(--shadow-lg);
+  max-width: 440px;
+  padding: 22px 24px;
+  width: 100%;
+}
+
+.trouble-modal-title {
+  color: var(--text-strong);
+  font-size: 1.05rem;
+  font-weight: 600;
+  margin: 0 0 6px;
+}
+
+.trouble-modal-state {
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin: 0 0 16px;
+}
+
+.trouble-modal-textarea {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.88rem;
+  padding: 10px 12px;
+  resize: vertical;
+  width: 100%;
+}
+
+.trouble-modal-textarea:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.trouble-modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 14px;
+}
+
+.trouble-modal-cancel,
+.trouble-modal-submit {
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 0.83rem;
+  font-weight: 500;
+  padding: 7px 16px;
+}
+
+.trouble-modal-cancel {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+
+.trouble-modal-cancel:hover {
+  background: var(--surface-2);
+}
+
+.trouble-modal-submit {
+  background: var(--accent-soft);
+  border: 1px solid rgba(219, 175, 95, 0.32);
+  color: var(--accent-strong);
+}
+
+.trouble-modal-submit:hover:not(:disabled) {
+  background: rgba(219, 175, 95, 0.26);
+}
+
+.trouble-modal-submit:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
