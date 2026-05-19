@@ -555,17 +555,20 @@ app.get('/d/:token/files', async (req, res) => {
 })
 
 // Range-aware file download proxy — logs access per file
+// Returns a short-lived pre-signed R2 URL so the browser downloads directly
+// from Cloudflare instead of piping through this server. All validation and
+// access logging still happens here; only the bytes bypass Railway.
 app.get('/d/:token/download', async (req, res) => {
   const { key } = req.query
-  if (!key) return res.status(400).send('Missing key')
+  if (!key) return res.status(400).json({ error: 'Missing key' })
 
   const link = await db.query(
     'SELECT expires_at, revoked_at FROM delivery_links WHERE token = $1',
     [req.params.token]
   )
-  if (!link.rows.length) return res.status(404).send('Not found')
+  if (!link.rows.length) return res.status(404).json({ error: 'Not found' })
   const { expires_at, revoked_at } = link.rows[0]
-  if (revoked_at || new Date(expires_at) < new Date()) return res.status(410).send('Expired')
+  if (revoked_at || new Date(expires_at) < new Date()) return res.status(410).json({ error: 'Expired' })
 
   // Verify this key belongs to this token — check original, proxy, and transcript keys
   const asset = await db.query(
@@ -582,49 +585,35 @@ app.get('/d/:token/download', async (req, res) => {
     mime_type = isProxy ? 'video/mp4' : (a.mime_type || 'application/octet-stream')
     file_size = isProxy ? a.proxy_file_size : a.file_size
   } else {
-    // Check transcript table
     const transcript = await db.query(
       'SELECT filename, file_size FROM delivery_link_transcripts WHERE token = $1 AND r2_key = $2',
       [req.params.token, key]
     )
-    if (!transcript.rows.length) return res.status(403).send('Forbidden')
+    if (!transcript.rows.length) return res.status(403).json({ error: 'Forbidden' })
     filename  = transcript.rows[0].filename
     mime_type = 'application/octet-stream'
     file_size = transcript.rows[0].file_size
   }
-  const rangeHeader = req.headers['range']
 
-  const s3Params = { Bucket: process.env.R2_BUCKET, Key: key }
-  if (rangeHeader) s3Params.Range = rangeHeader
+  // Pre-sign for 4 hours — enough for slow connections downloading large files.
+  const url = await getSignedUrl(
+    s3,
+    new GetObjectCommand({
+      Bucket: process.env.R2_BUCKET,
+      Key:    key,
+      ResponseContentDisposition: `attachment; filename="${sanitizeFilename(filename)}"`,
+      ResponseContentType: mime_type,
+    }),
+    { expiresIn: 4 * 60 * 60 }
+  )
 
-  let s3Res
-  try {
-    s3Res = await s3.send(new GetObjectCommand(s3Params))
-  } catch (err) {
-    if (err.name === 'NoSuchKey') return res.status(404).send('File not found')
-    throw err
-  }
+  // Log once per file (not per chunk — chunks now go direct to R2).
+  db.query(
+    'INSERT INTO delivery_link_access (token, ip, user_agent, file_key) VALUES ($1, $2, $3, $4)',
+    [req.params.token, req.ip, req.headers['user-agent'] || null, key]
+  ).catch(() => {})
 
-  res.setHeader('Accept-Ranges', 'bytes')
-  res.setHeader('Content-Type', mime_type || 'application/octet-stream')
-  res.setHeader('Content-Disposition', `attachment; filename="${sanitizeFilename(filename)}"`)
-
-  if (s3Res.ContentLength) res.setHeader('Content-Length', s3Res.ContentLength)
-  if (s3Res.ContentRange)  res.setHeader('Content-Range', s3Res.ContentRange)
-
-  res.status(rangeHeader ? 206 : 200)
-  s3Res.Body.pipe(res)
-
-  // Log asynchronously — only on first chunk (bytes=0-...) or non-Range requests.
-  // Chunked downloads issue one request per 25 MB chunk; logging every chunk would
-  // count a single file download as N events and inflate access analytics badly.
-  const isFirstChunk = !rangeHeader || rangeHeader.startsWith('bytes=0-')
-  if (isFirstChunk) {
-    db.query(
-      'INSERT INTO delivery_link_access (token, ip, user_agent, file_key) VALUES ($1, $2, $3, $4)',
-      [req.params.token, req.ip, req.headers['user-agent'] || null, key]
-    ).catch(() => {})
-  }
+  res.json({ url, filename, mime_type, file_size })
 })
 
 // ── Delivery trouble report ───────────────────────────────────────────────────

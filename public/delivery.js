@@ -583,11 +583,18 @@ function attachActionHandlers(actionDiv, f, s) {
     })
   }
 
-  // Transcript download links inside popout
+  // Transcript download links — resolve pre-signed URL then let browser download directly
   actionDiv.querySelectorAll('[data-action="dl-transcript"]').forEach((link) => {
-    link.addEventListener('click', (e) => {
+    link.addEventListener('click', async (e) => {
+      e.preventDefault()
       e.stopPropagation()
       closePopout()
+      try {
+        const url = await resolveDownloadUrl(link.dataset.key)
+        window.location.href = url
+      } catch (err) {
+        showToast(err.message || 'Download failed', 'error')
+      }
     })
   })
 
@@ -667,11 +674,9 @@ function getActionHtml(f, s) {
     transcriptPopoutHtml = `
       <div class="dlv-popout dlv-popout--transcript">
         ${f.transcripts.map((t) => `
-          <a class="dlv-popout-btn" data-action="dl-transcript"
-            href="/d/${escHtml(token)}/download?key=${encodeURIComponent(t.r2_key)}"
-            download="${escHtml(t.filename)}">
+          <button class="dlv-popout-btn" data-action="dl-transcript" data-key="${escHtml(t.r2_key)}">
             ${escHtml(kindLabel[t.kind] || t.kind.toUpperCase())}
-          </a>`).join('')}
+          </button>`).join('')}
       </div>`
   }
 
@@ -712,6 +717,14 @@ async function runQueue() {
   }
 }
 
+async function resolveDownloadUrl(key) {
+  const res = await fetch(`/d/${token}/download?key=${encodeURIComponent(key)}`)
+  if (res.status === 410) { clearStorage(); throw new Error('This delivery link has expired.') }
+  if (!res.ok) throw new Error(`Could not resolve download URL (${res.status})`)
+  const { url } = await res.json()
+  return url
+}
+
 async function downloadOne(fileDesc) {
   const key = fileDesc.r2_key
   if (state.get(key) === 'complete') return
@@ -719,6 +732,16 @@ async function downloadOne(fileDesc) {
   progress.set(key, 0)
   errors.delete(key)
   scheduleRender()
+
+  let presignedUrl
+  try {
+    presignedUrl = await resolveDownloadUrl(key)
+  } catch (err) {
+    state.set(key, 'failed')
+    errors.set(key, err.message || String(err))
+    scheduleRender()
+    return
+  }
 
   let writer
   try {
@@ -743,7 +766,7 @@ async function downloadOne(fileDesc) {
         if (state.get(key) !== 'downloading') break
       }
       const end = Math.min(start + CHUNK_SIZE - 1, total - 1)
-      const buf = await fetchChunkWithRetry(key, start, end)
+      const buf = await fetchChunkWithRetry(presignedUrl, start, end)
       await writer.write(new Uint8Array(buf))
       written += buf.byteLength
       progress.set(key, Math.round((written / total) * 100))
@@ -761,13 +784,11 @@ async function downloadOne(fileDesc) {
   scheduleRender()
 }
 
-async function fetchChunkWithRetry(key, start, end) {
-  const url = `/d/${token}/download?key=${encodeURIComponent(key)}`
+async function fetchChunkWithRetry(url, start, end) {
   let lastErr
   for (let attempt = 0; attempt < CHUNK_RETRIES; attempt++) {
     try {
       const res = await fetch(url, { headers: { Range: `bytes=${start}-${end}` } })
-      if (res.status === 410) { clearStorage(); throw new Error('This delivery link has expired.') }
       if (!(res.status === 206 || res.status === 200)) throw new Error(`HTTP ${res.status}`)
       return await res.arrayBuffer()
     } catch (err) {
