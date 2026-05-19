@@ -305,6 +305,7 @@ app.get('/c/:token/download', async (req, res) => {
 // Create a delivery link
 app.post('/api/delivery', requireApiKey, async (req, res) => {
   const {
+    token: requestToken,
     project_name, client_name, label, expires_at, assets,
     created_by_user_email, project_id,
   } = req.body
@@ -317,7 +318,9 @@ app.post('/api/delivery', requireApiKey, async (req, res) => {
     }
   }
 
-  const token = randomUUID()
+  // Use the dashboard-supplied token (so R2 keys already uploaded under that token match).
+  // Fall back to generating one for older callers that don't send a token.
+  const token = requestToken || randomUUID()
 
   await db.query(
     `INSERT INTO delivery_links
@@ -721,20 +724,54 @@ app.post('/d/:token/report-trouble', async (req, res) => {
 
 // ── Delivery sweep — purge expired links and their R2 objects ─────────────────
 
+async function notifyDeliveryExpired({ token, project_name, client_name, label, created_by_user_email, project_id }) {
+  const dashboardOrigin = (process.env.DASHBOARD_ORIGIN || '').replace(/\/$/, '')
+  const apiKey = process.env.INGEST_API_KEY
+  if (!dashboardOrigin || !apiKey) return
+  try {
+    const r = await fetch(`${dashboardOrigin}/api/internal/delivery-expired`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
+      body: JSON.stringify({
+        deliveryToken:      token,
+        projectName:        project_name,
+        clientName:         client_name,
+        label,
+        createdByUserEmail: created_by_user_email,
+        projectId:          project_id,
+      }),
+    })
+    if (!r.ok) console.error(`[delivery-expired] dashboard returned ${r.status}`)
+  } catch (err) {
+    console.error('[delivery-expired] forward to dashboard failed:', err)
+  }
+}
+
 async function sweepExpiredDeliveries() {
   const expired = await db.query(
-    `SELECT token FROM delivery_links
+    `SELECT token, project_name, client_name, label, created_by_user_email, project_id
+     FROM delivery_links
      WHERE revoked_at IS NULL AND expires_at < NOW()`
   )
-  for (const { token } of expired.rows) {
-    const assets = await db.query('SELECT r2_key, thumbnail_r2_key FROM delivery_link_assets WHERE token = $1', [token])
-    await Promise.all(assets.rows.flatMap(a => [
-      s3.send(new DeleteObjectCommand({ Bucket: process.env.R2_BUCKET, Key: a.r2_key })).catch(() => {}),
-      a.thumbnail_r2_key
-        ? s3.send(new DeleteObjectCommand({ Bucket: process.env.R2_BUCKET, Key: a.thumbnail_r2_key })).catch(() => {})
-        : null,
-    ].filter(Boolean)))
+  for (const link of expired.rows) {
+    const { token, project_name, client_name, label, created_by_user_email, project_id } = link
+    const assets = await db.query(
+      'SELECT r2_key, thumbnail_r2_key, proxy_r2_key FROM delivery_link_assets WHERE token = $1',
+      [token]
+    )
+    const transcripts = await db.query(
+      'SELECT r2_key FROM delivery_link_transcripts WHERE token = $1',
+      [token]
+    )
+    const keysToDelete = [
+      ...assets.rows.flatMap(a => [a.r2_key, a.thumbnail_r2_key, a.proxy_r2_key].filter(Boolean)),
+      ...transcripts.rows.map(t => t.r2_key),
+    ]
+    await Promise.all(keysToDelete.map(k =>
+      s3.send(new DeleteObjectCommand({ Bucket: process.env.R2_BUCKET, Key: k })).catch(() => {})
+    ))
     await db.query('UPDATE delivery_links SET revoked_at = NOW() WHERE token = $1', [token])
+    notifyDeliveryExpired({ token, project_name, client_name, label, created_by_user_email, project_id }).catch(() => {})
   }
 }
 
