@@ -135,8 +135,21 @@ async function initDeliveryTables() {
     )
   `)
   // Migrate existing tables — safe to run repeatedly
-  await db.query(`ALTER TABLE delivery_link_assets ADD COLUMN IF NOT EXISTS thumbnail_url TEXT`)
+  await db.query(`ALTER TABLE delivery_link_assets ADD COLUMN IF NOT EXISTS thumbnail_url    TEXT`)
   await db.query(`ALTER TABLE delivery_link_assets ADD COLUMN IF NOT EXISTS thumbnail_r2_key TEXT`)
+  await db.query(`ALTER TABLE delivery_link_assets ADD COLUMN IF NOT EXISTS proxy_r2_key     TEXT`)
+  await db.query(`ALTER TABLE delivery_link_assets ADD COLUMN IF NOT EXISTS proxy_file_size  BIGINT`)
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS delivery_link_transcripts (
+      id           SERIAL PRIMARY KEY,
+      token        TEXT NOT NULL REFERENCES delivery_links(token) ON DELETE CASCADE,
+      asset_r2_key TEXT NOT NULL,
+      r2_key       TEXT NOT NULL,
+      filename     TEXT NOT NULL,
+      file_size    BIGINT NOT NULL,
+      kind         TEXT NOT NULL
+    )
+  `)
   await db.query(`
     CREATE TABLE IF NOT EXISTS delivery_link_access (
       id          SERIAL PRIMARY KEY,
@@ -377,6 +390,50 @@ app.patch('/api/delivery/:token', requireApiKey, async (req, res) => {
   res.json({ ok: true })
 })
 
+// Mark proxy ready for a specific asset — called by dashboard after each proxy upload
+app.patch('/api/delivery/:token/assets/proxy', requireApiKey, async (req, res) => {
+  const { r2_key, proxy_r2_key, proxy_file_size } = req.body
+  if (!r2_key || !proxy_r2_key || !proxy_file_size) {
+    return res.status(400).json({ error: 'r2_key, proxy_r2_key, and proxy_file_size are required' })
+  }
+  const result = await db.query(
+    `UPDATE delivery_link_assets SET proxy_r2_key = $1, proxy_file_size = $2
+     WHERE token = $3 AND r2_key = $4 RETURNING id`,
+    [proxy_r2_key, proxy_file_size, req.params.token, r2_key]
+  )
+  if (!result.rows.length) return res.status(404).json({ error: 'Asset not found' })
+  res.json({ ok: true })
+})
+
+// Register transcripts for an asset — called by dashboard after transcript upload
+app.post('/api/delivery/:token/transcripts', requireApiKey, async (req, res) => {
+  const { asset_r2_key, transcripts } = req.body
+  if (!asset_r2_key || !Array.isArray(transcripts) || !transcripts.length) {
+    return res.status(400).json({ error: 'asset_r2_key and transcripts array are required' })
+  }
+  for (const t of transcripts) {
+    if (!t.r2_key || !t.filename || !t.file_size || !t.kind) {
+      return res.status(400).json({ error: 'Each transcript requires r2_key, filename, file_size, kind' })
+    }
+  }
+  // Verify asset belongs to this token
+  const asset = await db.query(
+    'SELECT id FROM delivery_link_assets WHERE token = $1 AND r2_key = $2',
+    [req.params.token, asset_r2_key]
+  )
+  if (!asset.rows.length) return res.status(404).json({ error: 'Asset not found' })
+
+  for (const t of transcripts) {
+    await db.query(
+      `INSERT INTO delivery_link_transcripts (token, asset_r2_key, r2_key, filename, file_size, kind)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT DO NOTHING`,
+      [req.params.token, asset_r2_key, t.r2_key, t.filename, t.file_size, t.kind]
+    )
+  }
+  res.json({ ok: true })
+})
+
 // Revoke a delivery link and delete its R2 objects
 app.delete('/api/delivery/:token', requireApiKey, async (req, res) => {
   const link = await db.query(
@@ -386,16 +443,21 @@ app.delete('/api/delivery/:token', requireApiKey, async (req, res) => {
   if (!link.rows.length) return res.status(404).json({ error: 'Not found or already revoked' })
 
   const assets = await db.query(
-    'SELECT r2_key, thumbnail_r2_key FROM delivery_link_assets WHERE token = $1',
+    'SELECT r2_key, thumbnail_r2_key, proxy_r2_key FROM delivery_link_assets WHERE token = $1',
+    [req.params.token]
+  )
+  const transcripts = await db.query(
+    'SELECT r2_key FROM delivery_link_transcripts WHERE token = $1',
     [req.params.token]
   )
 
-  await Promise.all(assets.rows.flatMap(a => [
-    s3.send(new DeleteObjectCommand({ Bucket: process.env.R2_BUCKET, Key: a.r2_key })).catch(() => {}),
-    a.thumbnail_r2_key
-      ? s3.send(new DeleteObjectCommand({ Bucket: process.env.R2_BUCKET, Key: a.thumbnail_r2_key })).catch(() => {})
-      : null,
-  ].filter(Boolean)))
+  const keysToDelete = [
+    ...assets.rows.flatMap(a => [a.r2_key, a.thumbnail_r2_key, a.proxy_r2_key].filter(Boolean)),
+    ...transcripts.rows.map(t => t.r2_key),
+  ]
+  await Promise.all(keysToDelete.map(k =>
+    s3.send(new DeleteObjectCommand({ Bucket: process.env.R2_BUCKET, Key: k })).catch(() => {})
+  ))
 
   await db.query(
     'UPDATE delivery_links SET revoked_at = NOW() WHERE token = $1',
@@ -449,9 +511,22 @@ app.get('/d/:token/files', async (req, res) => {
   }
 
   const assets = await db.query(
-    'SELECT r2_key, filename, file_size, mime_type, thumbnail_url, thumbnail_r2_key FROM delivery_link_assets WHERE token = $1 ORDER BY id',
+    `SELECT r2_key, filename, file_size, mime_type, thumbnail_url, thumbnail_r2_key,
+            proxy_r2_key, proxy_file_size
+     FROM delivery_link_assets WHERE token = $1 ORDER BY id`,
     [req.params.token]
   )
+
+  const transcriptRows = await db.query(
+    'SELECT asset_r2_key, r2_key, filename, file_size, kind FROM delivery_link_transcripts WHERE token = $1',
+    [req.params.token]
+  )
+  // Group transcripts by asset r2_key for O(1) lookup below
+  const transcriptsByAsset = new Map()
+  for (const t of transcriptRows.rows) {
+    if (!transcriptsByAsset.has(t.asset_r2_key)) transcriptsByAsset.set(t.asset_r2_key, [])
+    transcriptsByAsset.get(t.asset_r2_key).push({ r2_key: t.r2_key, filename: t.filename, file_size: t.file_size, kind: t.kind })
+  }
 
   const rows = await Promise.all(assets.rows.map(async (a) => {
     let thumbnailUrl = a.thumbnail_url || null
@@ -459,9 +534,18 @@ app.get('/d/:token/files', async (req, res) => {
       thumbnailUrl = await getSignedUrl(s3, new GetObjectCommand({
         Bucket: process.env.R2_BUCKET,
         Key: a.thumbnail_r2_key,
-      }), { expiresIn: 86400 }).catch(() => null) // 24h, silent on error
+      }), { expiresIn: 86400 }).catch(() => null)
     }
-    return { r2_key: a.r2_key, filename: a.filename, file_size: a.file_size, mime_type: a.mime_type, thumbnail_url: thumbnailUrl }
+    return {
+      r2_key:          a.r2_key,
+      filename:        a.filename,
+      file_size:       a.file_size,
+      mime_type:       a.mime_type,
+      thumbnail_url:   thumbnailUrl,
+      proxy_r2_key:    a.proxy_r2_key    || null,
+      proxy_file_size: a.proxy_file_size || null,
+      transcripts:     transcriptsByAsset.get(a.r2_key) || [],
+    }
   }))
 
   res.json(rows)
@@ -480,14 +564,31 @@ app.get('/d/:token/download', async (req, res) => {
   const { expires_at, revoked_at } = link.rows[0]
   if (revoked_at || new Date(expires_at) < new Date()) return res.status(410).send('Expired')
 
-  // Verify this key belongs to this token
+  // Verify this key belongs to this token — check original, proxy, and transcript keys
   const asset = await db.query(
-    'SELECT filename, mime_type, file_size FROM delivery_link_assets WHERE token = $1 AND r2_key = $2',
+    `SELECT filename, mime_type, file_size, r2_key AS orig_key, proxy_r2_key, proxy_file_size
+     FROM delivery_link_assets
+     WHERE token = $1 AND (r2_key = $2 OR proxy_r2_key = $2)`,
     [req.params.token, key]
   )
-  if (!asset.rows.length) return res.status(403).send('Forbidden')
-
-  const { filename, mime_type, file_size } = asset.rows[0]
+  let filename, mime_type, file_size
+  if (asset.rows.length) {
+    const a = asset.rows[0]
+    const isProxy = a.proxy_r2_key === key && a.orig_key !== key
+    filename  = a.filename
+    mime_type = isProxy ? 'video/mp4' : (a.mime_type || 'application/octet-stream')
+    file_size = isProxy ? a.proxy_file_size : a.file_size
+  } else {
+    // Check transcript table
+    const transcript = await db.query(
+      'SELECT filename, file_size FROM delivery_link_transcripts WHERE token = $1 AND r2_key = $2',
+      [req.params.token, key]
+    )
+    if (!transcript.rows.length) return res.status(403).send('Forbidden')
+    filename  = transcript.rows[0].filename
+    mime_type = 'application/octet-stream'
+    file_size = transcript.rows[0].file_size
+  }
   const rangeHeader = req.headers['range']
 
   const s3Params = { Bucket: process.env.R2_BUCKET, Key: key }

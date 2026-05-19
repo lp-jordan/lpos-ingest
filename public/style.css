@@ -667,6 +667,149 @@ button:focus-visible, a:focus-visible {
   text-decoration-style: solid;
 }
 
+/* ── Quality picker (batch download) ─────────────────────────────────────────── */
+
+.delivery-quality-picker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  animation: dlv-fade-in 0.12s ease;
+}
+
+@keyframes dlv-fade-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.delivery-quality-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 0.83rem;
+  font-weight: 500;
+  padding: 6px 14px;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.delivery-quality-btn--full {
+  background: var(--accent-soft);
+  border: 1px solid rgba(219, 175, 95, 0.28);
+  color: var(--accent-strong);
+}
+.delivery-quality-btn--full:hover {
+  background: rgba(219, 175, 95, 0.26);
+  border-color: rgba(219, 175, 95, 0.48);
+}
+
+.delivery-quality-btn--web {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  color: var(--fg);
+}
+.delivery-quality-btn--web:hover {
+  background: var(--surface-3);
+  border-color: var(--line-strong);
+}
+
+.delivery-quality-close {
+  background: none;
+  border: none;
+  color: var(--muted-soft);
+  cursor: pointer;
+  font-size: 0.85rem;
+  padding: 4px 6px;
+  border-radius: 4px;
+}
+.delivery-quality-close:hover { color: var(--muted); background: var(--surface-3); }
+
+/* ── Individual row action group ─────────────────────────────────────────────── */
+
+.dlv-row-action-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  position: relative;
+}
+
+/* Download icon active state (popout open) */
+.dlv-row-dl--active {
+  color: var(--accent) !important;
+  opacity: 1 !important;
+  background: var(--accent-soft) !important;
+}
+
+/* ── Transcript button ───────────────────────────────────────────────────────── */
+
+.dlv-row-tx {
+  background: none;
+  border: none;
+  border-radius: 6px;
+  color: var(--muted-soft);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  opacity: 0;
+  padding: 6px;
+  transition: opacity 0.12s, background 0.12s, color 0.12s;
+  width: 28px;
+  height: 28px;
+}
+.dlv-row:hover .dlv-row-tx { opacity: 0.6; }
+.dlv-row-tx:hover { background: var(--surface-3); color: var(--fg); opacity: 1 !important; }
+.dlv-row-tx--active {
+  color: var(--accent) !important;
+  opacity: 1 !important;
+  background: var(--accent-soft) !important;
+}
+
+/* ── Individual download popout ──────────────────────────────────────────────── */
+
+.dlv-popout {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.32);
+  display: flex;
+  flex-direction: column;
+  min-width: 180px;
+  overflow: hidden;
+  z-index: 40;
+  animation: dlv-fade-in 0.1s ease;
+}
+
+.dlv-popout--transcript {
+  min-width: 160px;
+}
+
+.dlv-popout-btn {
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--line);
+  color: var(--fg);
+  cursor: pointer;
+  display: block;
+  font-size: 0.82rem;
+  padding: 10px 14px;
+  text-align: left;
+  text-decoration: none;
+  transition: background 0.1s;
+  width: 100%;
+}
+.dlv-popout-btn:last-child { border-bottom: none; }
+.dlv-popout-btn:hover { background: var(--surface-3); }
+.dlv-popout-btn--disabled {
+  color: var(--muted-soft);
+  cursor: default;
+}
+.dlv-popout-btn--disabled:hover { background: none; }
+
 .trouble-modal {
   align-items: center;
   background: rgba(0, 0, 0, 0.55);
