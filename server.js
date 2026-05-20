@@ -785,8 +785,21 @@ function escapeHtml(str) {
     .replace(/"/g, '&quot;')
 }
 
-initDeliveryTables()
-  .then(() => app.listen(process.env.PORT || 3000, () => {
-    console.log(`lpos-ingest running on :${process.env.PORT || 3000}`)
-  }))
-  .catch(err => { console.error('Failed to init delivery tables:', err); process.exit(1) })
+// Start listening immediately so Railway's health check passes, then init the
+// DB in the background with retries. The DB is almost always ready by the time
+// real traffic arrives; if not, individual requests will fail gracefully.
+app.listen(process.env.PORT || 3000, () => {
+  console.log(`lpos-ingest running on :${process.env.PORT || 3000}`)
+})
+
+async function initWithRetry(attempts = 0) {
+  try {
+    await initDeliveryTables()
+    console.log('DB tables ready')
+  } catch (err) {
+    const delay = Math.min(2 ** attempts * 1000, 30_000)
+    console.error(`DB init failed (attempt ${attempts + 1}), retrying in ${delay / 1000}s:`, err.message)
+    setTimeout(() => initWithRetry(attempts + 1), delay)
+  }
+}
+initWithRetry()
