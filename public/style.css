@@ -519,6 +519,28 @@ button:focus-visible, a:focus-visible {
   border-color: rgba(220, 80, 80, 0.48);
 }
 
+/* ── Delivery reset button ────────────────────────────────────────────────────── */
+
+.delivery-reset-btn {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.83rem;
+  font-weight: 500;
+  padding: 6px 14px;
+}
+
+.delivery-reset-btn:hover {
+  background: var(--surface-3);
+  color: var(--text-strong);
+}
+
 /* ── Delivery overall progress strip ──────────────────────────────────────────── */
 
 .delivery-overall {

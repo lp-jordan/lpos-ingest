@@ -21,6 +21,7 @@ const { token, project: projectName, client: clientName, label } = document.docu
 const list                = document.getElementById('delivery-list')
 const dlBtn               = document.getElementById('download-all')
 const retryBtn            = document.getElementById('retry-failed')
+const resetBtn            = document.getElementById('reset-downloads')
 const overallProgressWrap = document.getElementById('overall-progress')
 const overallBar          = document.getElementById('overall-progress-bar')
 const overallLabel        = document.getElementById('overall-progress-label')
@@ -222,6 +223,10 @@ function updateBatchBtn() {
 
   dlBtn.disabled = !anyPending || queueRunning
 
+  // Reset button appears once at least one file is marked complete and nothing is
+  // actively downloading — lets a returning client clear the "Downloaded" marks.
+  if (resetBtn) resetBtn.hidden = !(c.complete > 0) || queueRunning
+
   if (queueRunning && !queuePaused) {
     dlBtn.textContent = 'Downloading…'
   } else if (queueRunning && queuePaused) {
@@ -317,6 +322,27 @@ retryBtn.addEventListener('click', () => {
   }
   scheduleRender()
   runQueue()
+})
+
+resetBtn.addEventListener('click', () => {
+  // Clear the locally-remembered "Downloaded" state so files can be pulled again.
+  // Server never blocks a re-download (only expiry/revoke do), so this is purely
+  // about re-enabling the buttons this browser hid after the first pass.
+  for (const f of files) {
+    for (const k of [f.r2_key, f.proxy_r2_key]) {
+      if (k && state.get(k) === 'complete') {
+        state.set(k, 'pending')
+        progress.delete(k)
+        errors.delete(k)
+      }
+    }
+  }
+  clearStorage()
+  selected.clear()
+  updateCheckboxesFromSelection()
+  closeQualityPicker()
+  showToast('Downloads reset — you can download these files again', 'success')
+  scheduleRender()
 })
 
 function startBatchDownload(quality) {
