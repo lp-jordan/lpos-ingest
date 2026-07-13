@@ -550,6 +550,12 @@ button:focus-visible, a:focus-visible {
   margin-bottom: 16px;
 }
 
+/* Without this, the class's display:flex overrides the [hidden] attribute the
+   render code sets, so the strip never actually hides (e.g. after a reset). */
+.delivery-overall[hidden] {
+  display: none;
+}
+
 .delivery-overall-bar {
   background: var(--surface-3);
   border-radius: 999px;
