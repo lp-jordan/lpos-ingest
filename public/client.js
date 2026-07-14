@@ -49,6 +49,12 @@ fileInput.addEventListener('change', () => {
 })
 
 // ── Upload ─────────────────────────────────────────────────────────────────────
+//
+// Direct-to-R2 handshake: ask the server for a presigned PUT URL, upload the
+// bytes straight to R2, then tell the server to record the submission. Keep the
+// limit in sync with MAX_UPLOAD_BYTES on the server.
+
+const MAX_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024  // 5 GB
 
 async function uploadFiles(files) {
   for (const file of files) {
@@ -57,13 +63,59 @@ async function uploadFiles(files) {
   loadFiles()
 }
 
-function uploadOne(file) {
-  return new Promise(resolve => {
-    const xhr = new XMLHttpRequest()
-    const fd = new FormData()
-    fd.append('file', file)
+async function uploadOne(file) {
+  if (file.size > MAX_UPLOAD_BYTES) {
+    showToast(`${file.name} is too large (max 5 GB)`, 'error')
+    return
+  }
 
-    setZoneBusy(true)
+  const contentType = file.type || 'application/octet-stream'
+  setZoneBusy(true)
+  barFill.style.width = '0%'
+
+  try {
+    // 1. Ask the server for a presigned PUT URL.
+    const reqRes = await fetch(`/c/${token}/request-upload`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fileName: file.name, size: file.size, contentType }),
+    })
+    if (!reqRes.ok) {
+      const { error } = await reqRes.json().catch(() => ({}))
+      showToast(error || `Failed to upload ${file.name}`, 'error')
+      return
+    }
+    const { uploadUrl, fileKey } = await reqRes.json()
+
+    // 2. PUT the bytes straight to R2.
+    await putToR2(uploadUrl, file, contentType)
+
+    // 3. Confirm so the server records the submission.
+    const confRes = await fetch(`/c/${token}/confirm-upload`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fileKey }),
+    })
+    if (!confRes.ok) {
+      const { error } = await confRes.json().catch(() => ({}))
+      showToast(error || `Failed to finalise ${file.name}`, 'error')
+      return
+    }
+
+    barFill.style.width = '100%'
+    showToast(`${file.name} uploaded`, 'success')
+  } catch {
+    showToast(`Failed to upload ${file.name}`, 'error')
+  } finally {
+    setTimeout(() => { barFill.style.width = '0%'; setZoneBusy(false) }, 400)
+  }
+}
+
+function putToR2(url, file, contentType) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('PUT', url)
+    xhr.setRequestHeader('Content-Type', contentType)
 
     xhr.upload.addEventListener('progress', e => {
       if (e.lengthComputable) {
@@ -72,28 +124,11 @@ function uploadOne(file) {
     })
 
     xhr.addEventListener('load', () => {
-      barFill.style.width = '100%'
-      setTimeout(() => {
-        barFill.style.width = '0%'
-        setZoneBusy(false)
-        if (xhr.status === 200) {
-          showToast(`${file.name} uploaded`, 'success')
-        } else {
-          showToast(`Failed to upload ${file.name}`, 'error')
-        }
-        resolve()
-      }, 400)
+      if (xhr.status >= 200 && xhr.status < 300) resolve()
+      else reject(new Error(`R2 responded ${xhr.status}`))
     })
-
-    xhr.addEventListener('error', () => {
-      setZoneBusy(false)
-      barFill.style.width = '0%'
-      showToast(`Upload failed`, 'error')
-      resolve()
-    })
-
-    xhr.open('POST', `/c/${token}/upload`)
-    xhr.send(fd)
+    xhr.addEventListener('error', () => reject(new Error('network error')))
+    xhr.send(file)
   })
 }
 

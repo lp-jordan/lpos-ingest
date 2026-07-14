@@ -1,7 +1,6 @@
 import express from 'express'
-import multer from 'multer'
 import pg from 'pg'
-import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3'
+import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3'
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
@@ -72,22 +71,15 @@ function isRateLimited(token) {
   return entry.count > RATE_MAX
 }
 
-// ── Multer ────────────────────────────────────────────────────────────────────
+// ── Upload size ceiling ─────────────────────────────────────────────────────
+//
+// Clients upload straight to R2 via a presigned PUT, so there is no multer
+// middleware to enforce a size limit. The cap is checked client-side before a
+// URL is issued and re-verified server-side (HEAD) at confirm time. 5 GiB is the
+// ceiling for a single S3/R2 PUT; larger would need multipart.
 
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 500 * 1024 * 1024 },
-  fileFilter: (_req, file, cb) => {
-    const ext = extname(file.originalname).toLowerCase()
-    if (BLOCKED_EXTENSIONS.has(ext)) {
-      return cb(new Error(`File type ${ext} is not allowed`))
-    }
-    if (!ALLOWED_MIME_TYPES.has(file.mimetype)) {
-      return cb(new Error(`MIME type ${file.mimetype} is not allowed`))
-    }
-    cb(null, true)
-  },
-})
+const MAX_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024  // 5 GiB
+function formatMaxSize() { return `${MAX_UPLOAD_BYTES / (1024 ** 3)} GB` }
 
 const s3 = new S3Client({
   region: 'auto',
@@ -212,15 +204,14 @@ app.get('/c/:token', async (req, res) => {
   res.send(html)
 })
 
-// ── File upload ───────────────────────────────────────────────────────────────
+// ── File upload (presigned direct-to-R2 handshake) ─────────────────────────────
+//
+// File bytes never transit this server. The browser:
+//   1. POST /c/:token/request-upload → we validate + return a presigned PUT URL
+//   2. PUTs the file straight to R2 (requires bucket CORS allowing PUT)
+//   3. POST /c/:token/confirm-upload → we HEAD-verify and record the submission
 
-app.post('/c/:token/upload', (req, res, next) => {
-  // Run multer, catch fileFilter rejections
-  upload.single('file')(req, res, (err) => {
-    if (err) return res.status(400).json({ error: err.message })
-    next()
-  })
-}, async (req, res) => {
+app.post('/c/:token/request-upload', async (req, res) => {
   if (isRateLimited(req.params.token)) {
     return res.status(429).json({ error: 'Too many uploads — please wait a moment' })
   }
@@ -231,23 +222,88 @@ app.post('/c/:token/upload', (req, res, next) => {
   )
   if (!result.rows.length) return res.status(404).json({ error: 'Not found' })
 
-  if (!req.file) return res.status(400).json({ error: 'No file' })
+  const { fileName, size, contentType } = req.body ?? {}
+  if (!fileName || !contentType) {
+    return res.status(400).json({ error: 'fileName and contentType are required' })
+  }
 
-  const clientId = result.rows[0].id
-  const safeName = sanitizeFilename(req.file.originalname)
+  const ext = extname(fileName).toLowerCase()
+  if (BLOCKED_EXTENSIONS.has(ext)) {
+    return res.status(400).json({ error: `File type ${ext} is not allowed` })
+  }
+  if (!ALLOWED_MIME_TYPES.has(contentType)) {
+    return res.status(400).json({ error: `File type ${contentType} is not allowed` })
+  }
+  if (typeof size === 'number' && size > MAX_UPLOAD_BYTES) {
+    return res.status(400).json({ error: `File is too large (max ${formatMaxSize()})` })
+  }
+
+  const safeName = sanitizeFilename(fileName)
   const fileKey  = `${req.params.token}/${Date.now()}-${safeName}`
 
-  await s3.send(new PutObjectCommand({
+  // Sign ContentType too, so the stored object gets the right type and the
+  // browser must PUT with a matching Content-Type header.
+  const uploadUrl = await getSignedUrl(s3, new PutObjectCommand({
     Bucket: process.env.R2_BUCKET,
     Key: fileKey,
-    Body: req.file.buffer,
-    ContentType: req.file.mimetype,
-  }))
+    ContentType: contentType,
+  }), { expiresIn: 6 * 60 * 60 })  // 6h — room for large uploads on slow links
+
+  res.json({ uploadUrl, fileKey })
+})
+
+app.post('/c/:token/confirm-upload', async (req, res) => {
+  const result = await db.query(
+    'SELECT id FROM ingest_clients WHERE token = $1 AND active = true',
+    [req.params.token]
+  )
+  if (!result.rows.length) return res.status(404).json({ error: 'Not found' })
+
+  const clientId = result.rows[0].id
+  const { fileKey } = req.body ?? {}
+  if (!fileKey) return res.status(400).json({ error: 'fileKey is required' })
+
+  // The key must live under this token's prefix — stops a client claiming
+  // another client's object.
+  if (!fileKey.startsWith(`${req.params.token}/`)) {
+    return res.status(403).json({ error: 'Forbidden' })
+  }
+
+  // Confirm the object actually landed in R2 and read its real size/type.
+  let head
+  try {
+    head = await s3.send(new HeadObjectCommand({
+      Bucket: process.env.R2_BUCKET,
+      Key: fileKey,
+    }))
+  } catch {
+    return res.status(400).json({ error: 'Upload not found in storage' })
+  }
+
+  const fileSize = Number(head.ContentLength ?? 0)
+  const mimeType = head.ContentType || 'application/octet-stream'
+
+  // Re-enforce the size ceiling — a presigned PUT can't cap size itself.
+  if (fileSize > MAX_UPLOAD_BYTES) {
+    await s3.send(new DeleteObjectCommand({ Bucket: process.env.R2_BUCKET, Key: fileKey }))
+      .catch(() => {})
+    return res.status(400).json({ error: `File is too large (max ${formatMaxSize()})` })
+  }
+
+  // Idempotent — a retried confirm shouldn't insert a duplicate row.
+  const existing = await db.query(
+    'SELECT id FROM ingest_submissions WHERE file_key = $1',
+    [fileKey]
+  )
+  if (existing.rows.length) return res.json({ ok: true })
+
+  // Recover the original (already-sanitized) name embedded in the key.
+  const fileName = fileKey.split('/').pop().replace(/^\d+-/, '')
 
   await db.query(
     `INSERT INTO ingest_submissions (client_id, file_key, file_name, file_size, mime_type)
      VALUES ($1, $2, $3, $4, $5)`,
-    [clientId, fileKey, safeName, req.file.size, req.file.mimetype]
+    [clientId, fileKey, fileName, fileSize, mimeType]
   )
 
   res.json({ ok: true })
