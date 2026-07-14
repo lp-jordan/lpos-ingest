@@ -444,23 +444,60 @@ app.post('/api/delivery/:token/assets', requireApiKey, async (req, res) => {
   if (!link.rows.length) return res.status(404).json({ error: 'Not found or revoked' })
 
   const existing = await db.query(
-    'SELECT asset_id FROM delivery_link_assets WHERE token = $1 AND asset_id IS NOT NULL',
+    'SELECT asset_id, filename FROM delivery_link_assets WHERE token = $1',
     [req.params.token]
   )
-  const existingAssetIds = new Set(existing.rows.map(r => r.asset_id))
+  // Dedup by asset_id (tracked) AND by filename (guards untracked/legacy rows,
+  // whose asset_id is null, from being physically duplicated).
+  const existingAssetIds  = new Set(existing.rows.map(r => r.asset_id).filter(Boolean))
+  const existingFilenames = new Set(existing.rows.map(r => r.filename))
 
   let added = 0
   for (const a of assets) {
     if (a.asset_id && existingAssetIds.has(a.asset_id)) continue // already on the link
+    if (existingFilenames.has(a.filename)) continue              // same filename already present
     await db.query(
       `INSERT INTO delivery_link_assets (token, r2_key, filename, file_size, mime_type, thumbnail_url, thumbnail_r2_key, asset_id, asset_version)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
       [req.params.token, a.r2_key, a.filename, a.file_size, a.mime_type, a.thumbnail_url || null, a.thumbnail_r2_key || null, a.asset_id || null, a.asset_version ?? null]
     )
     if (a.asset_id) existingAssetIds.add(a.asset_id)
+    existingFilenames.add(a.filename)
     added++
   }
   res.json({ ok: true, added })
+})
+
+// Remove a single asset from a delivery link ("Edit videos" uncheck). Deletes the
+// row plus its R2 objects (original + proxy + thumbnail) and its transcripts.
+app.delete('/api/delivery/:token/assets/:id', requireApiKey, async (req, res) => {
+  const id = parseInt(req.params.id, 10)
+  if (Number.isNaN(id)) return res.status(400).json({ error: 'Invalid asset id' })
+
+  const row = await db.query(
+    'SELECT id, r2_key, thumbnail_r2_key, proxy_r2_key FROM delivery_link_assets WHERE token = $1 AND id = $2',
+    [req.params.token, id]
+  )
+  if (!row.rows.length) return res.status(404).json({ error: 'Asset not found on this link' })
+  const a = row.rows[0]
+
+  const transcripts = await db.query(
+    'SELECT r2_key FROM delivery_link_transcripts WHERE token = $1 AND asset_r2_key = $2',
+    [req.params.token, a.r2_key]
+  )
+
+  const keysToDelete = [
+    ...[a.r2_key, a.thumbnail_r2_key, a.proxy_r2_key].filter(Boolean),
+    ...transcripts.rows.map(t => t.r2_key),
+  ]
+  await Promise.all(keysToDelete.map(k =>
+    s3.send(new DeleteObjectCommand({ Bucket: process.env.R2_BUCKET, Key: k })).catch(() => {})
+  ))
+
+  await db.query('DELETE FROM delivery_link_transcripts WHERE token = $1 AND asset_r2_key = $2', [req.params.token, a.r2_key])
+  await db.query('DELETE FROM delivery_link_assets WHERE token = $1 AND id = $2', [req.params.token, id])
+
+  res.json({ ok: true, deleted: 1 })
 })
 
 // Refresh existing assets in place ("refresh to latest"). The dashboard has
