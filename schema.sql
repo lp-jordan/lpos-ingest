@@ -4,7 +4,8 @@ CREATE TABLE ingest_clients (
   id               SERIAL PRIMARY KEY,
   token            TEXT NOT NULL UNIQUE,   -- URL-safe random string
   lpos_project_id  TEXT NOT NULL UNIQUE,   -- projectId from LPOS
-  first_name       TEXT NOT NULL,          -- used in "Hi, [name]!" greeting
+  first_name       TEXT NOT NULL,          -- client name, fallback for the greeting
+  welcome_name     TEXT,                    -- optional override for the "Hi, [name]!" greeting
   active           BOOLEAN NOT NULL DEFAULT true,
   created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -25,5 +26,6 @@ CREATE TABLE ingest_submissions (
 -- Migration for existing databases (run manually if table already exists)
 -- ALTER TABLE ingest_submissions ADD COLUMN IF NOT EXISTS promoted_to TEXT;
 -- ALTER TABLE ingest_submissions ADD COLUMN IF NOT EXISTS promoted_at TIMESTAMPTZ;
+-- ALTER TABLE ingest_clients ADD COLUMN IF NOT EXISTS welcome_name TEXT;
 
 CREATE INDEX ON ingest_submissions (client_id, created_at DESC);

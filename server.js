@@ -197,14 +197,15 @@ app.get('/api/key-debug', (_req, res) => {
 
 app.get('/c/:token', async (req, res) => {
   const result = await db.query(
-    'SELECT id, first_name FROM ingest_clients WHERE token = $1 AND active = true',
+    'SELECT id, first_name, welcome_name FROM ingest_clients WHERE token = $1 AND active = true',
     [req.params.token]
   )
   if (!result.rows.length) return res.status(404).send('Not found')
 
   const client = result.rows[0]
+  const greetingName = client.welcome_name || client.first_name
   const html = readFileSync(join(__dirname, 'views/client.html'), 'utf8')
-    .replace('{{CLIENT_NAME}}', escapeHtml(client.first_name))
+    .replace('{{CLIENT_NAME}}', escapeHtml(greetingName))
     .replace('{{TOKEN}}', escapeHtml(req.params.token))
   res.send(html)
 })
