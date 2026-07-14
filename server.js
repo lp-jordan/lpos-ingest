@@ -131,6 +131,11 @@ async function initDeliveryTables() {
   await db.query(`ALTER TABLE delivery_link_assets ADD COLUMN IF NOT EXISTS thumbnail_r2_key TEXT`)
   await db.query(`ALTER TABLE delivery_link_assets ADD COLUMN IF NOT EXISTS proxy_r2_key     TEXT`)
   await db.query(`ALTER TABLE delivery_link_assets ADD COLUMN IF NOT EXISTS proxy_file_size  BIGINT`)
+  // Source-asset tracking — lets the dashboard tell an item apart from its LPOS
+  // asset and detect when a newer version exists (for "add videos" + "refresh to
+  // latest"). Null on rows created before this shipped; those are never refreshable.
+  await db.query(`ALTER TABLE delivery_link_assets ADD COLUMN IF NOT EXISTS asset_id         TEXT`)
+  await db.query(`ALTER TABLE delivery_link_assets ADD COLUMN IF NOT EXISTS asset_version    INTEGER`)
   await db.query(`
     CREATE TABLE IF NOT EXISTS delivery_link_transcripts (
       id           SERIAL PRIMARY KEY,
@@ -390,14 +395,112 @@ app.post('/api/delivery', requireApiKey, async (req, res) => {
 
   for (const a of assets) {
     await db.query(
-      `INSERT INTO delivery_link_assets (token, r2_key, filename, file_size, mime_type, thumbnail_url, thumbnail_r2_key)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [token, a.r2_key, a.filename, a.file_size, a.mime_type, a.thumbnail_url || null, a.thumbnail_r2_key || null]
+      `INSERT INTO delivery_link_assets (token, r2_key, filename, file_size, mime_type, thumbnail_url, thumbnail_r2_key, asset_id, asset_version)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [token, a.r2_key, a.filename, a.file_size, a.mime_type, a.thumbnail_url || null, a.thumbnail_r2_key || null, a.asset_id || null, a.asset_version ?? null]
     )
   }
 
   const baseUrl = process.env.INGEST_BASE_URL || `http://localhost:${process.env.PORT || 3000}`
   res.json({ token, url: `${baseUrl}/d/${token}` })
+})
+
+// List the assets in a delivery link — used by the dashboard to show each item
+// and compute staleness (delivered asset_version vs the asset's current version).
+app.get('/api/delivery/:token/items', requireApiKey, async (req, res) => {
+  const link = await db.query(
+    'SELECT token FROM delivery_links WHERE token = $1 AND revoked_at IS NULL',
+    [req.params.token]
+  )
+  if (!link.rows.length) return res.status(404).json({ error: 'Not found or revoked' })
+
+  const result = await db.query(
+    `SELECT id, asset_id, asset_version, r2_key, filename, file_size, mime_type,
+            thumbnail_url, thumbnail_r2_key, proxy_r2_key, proxy_file_size
+     FROM delivery_link_assets WHERE token = $1 ORDER BY id ASC`,
+    [req.params.token]
+  )
+  res.json(result.rows)
+})
+
+// Append assets to an existing delivery link ("add videos"). Originals are
+// already uploaded to R2 by the dashboard; this just records the rows. Assets
+// already present on the link (matched by asset_id) are skipped, not duplicated.
+app.post('/api/delivery/:token/assets', requireApiKey, async (req, res) => {
+  const { assets } = req.body
+  if (!Array.isArray(assets) || !assets.length) {
+    return res.status(400).json({ error: 'assets array is required' })
+  }
+  for (const a of assets) {
+    if (!a.r2_key || !a.filename || !a.file_size || !a.mime_type) {
+      return res.status(400).json({ error: 'Each asset requires r2_key, filename, file_size, mime_type' })
+    }
+  }
+
+  const link = await db.query(
+    'SELECT token FROM delivery_links WHERE token = $1 AND revoked_at IS NULL',
+    [req.params.token]
+  )
+  if (!link.rows.length) return res.status(404).json({ error: 'Not found or revoked' })
+
+  const existing = await db.query(
+    'SELECT asset_id FROM delivery_link_assets WHERE token = $1 AND asset_id IS NOT NULL',
+    [req.params.token]
+  )
+  const existingAssetIds = new Set(existing.rows.map(r => r.asset_id))
+
+  let added = 0
+  for (const a of assets) {
+    if (a.asset_id && existingAssetIds.has(a.asset_id)) continue // already on the link
+    await db.query(
+      `INSERT INTO delivery_link_assets (token, r2_key, filename, file_size, mime_type, thumbnail_url, thumbnail_r2_key, asset_id, asset_version)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [req.params.token, a.r2_key, a.filename, a.file_size, a.mime_type, a.thumbnail_url || null, a.thumbnail_r2_key || null, a.asset_id || null, a.asset_version ?? null]
+    )
+    if (a.asset_id) existingAssetIds.add(a.asset_id)
+    added++
+  }
+  res.json({ ok: true, added })
+})
+
+// Refresh existing assets in place ("refresh to latest"). The dashboard has
+// already overwritten the R2 objects (same keys) with the current version's
+// bytes; here we update the recorded size/version and clear stale transcript
+// rows so the re-uploaded transcripts (if any) take over cleanly.
+app.post('/api/delivery/:token/assets/refresh', requireApiKey, async (req, res) => {
+  const { assets } = req.body
+  if (!Array.isArray(assets) || !assets.length) {
+    return res.status(400).json({ error: 'assets array is required' })
+  }
+
+  const link = await db.query(
+    'SELECT token FROM delivery_links WHERE token = $1 AND revoked_at IS NULL',
+    [req.params.token]
+  )
+  if (!link.rows.length) return res.status(404).json({ error: 'Not found or revoked' })
+
+  let updated = 0
+  for (const a of assets) {
+    if (!a.r2_key) continue
+    const result = await db.query(
+      `UPDATE delivery_link_assets
+         SET file_size = COALESCE($1, file_size),
+             mime_type = COALESCE($2, mime_type),
+             asset_version = COALESCE($3, asset_version)
+       WHERE token = $4 AND r2_key = $5 RETURNING id`,
+      [a.file_size ?? null, a.mime_type ?? null, a.asset_version ?? null, req.params.token, a.r2_key]
+    )
+    if (result.rows.length) {
+      updated++
+      // Drop existing transcripts for this item; Phase B re-registers whatever
+      // the current version has, avoiding stale carry-over.
+      await db.query(
+        'DELETE FROM delivery_link_transcripts WHERE token = $1 AND asset_r2_key = $2',
+        [req.params.token, a.r2_key]
+      )
+    }
+  }
+  res.json({ ok: true, updated })
 })
 
 // List delivery links — optionally filter by project_name
